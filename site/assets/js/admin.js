@@ -84,6 +84,10 @@ function tokenScreen(error) {
       try {
         await repo.checkAccess();
         await repo.getHead();
+        if (!(await repo.canWrite())) {
+          clear(msg, tokenWriteFix());
+          return;
+        }
       } catch (err) {
         msg.textContent = err.status === 401
           ? t('GitHub did not accept this token. Check you copied all of it, and that it has not expired.')
@@ -106,14 +110,36 @@ function tokenScreen(error) {
   input.focus();
 }
 
+const TOKEN_EDIT_URL = 'https://github.com/settings/personal-access-tokens';
+
+/** The fix when a token can read the archive but not save to it. */
+function tokenWriteFix() {
+  return h('div', { class: 'notice notice-warn token-fix' },
+    h('p', {}, h('strong', {}, t('This token can read the archive but is not allowed to save changes.')), ' ',
+      t('Usually “Repository access” was left on “Public repositories”, which only allows reading. You can fix the same token — no need to make a new one:')),
+    h('ol', {},
+      h('li', {}, t('Open '), h('a', { href: TOKEN_EDIT_URL, target: '_blank', rel: 'noopener' }, t('your fine-grained tokens on GitHub')), t(' and click the token’s name, then “Edit”.')),
+      h('li', {}, t('Repository access: choose “Only select repositories” and pick '), h('strong', {}, store?.repo?.repo || 'family-archive'), '.'),
+      h('li', {}, t('Repository permissions: set “Contents” to “Read and write” and “Actions” to “Read-only”.')),
+      h('li', {}, t('Click “Update”, come back here and try again.'))));
+}
+
+/** Turn GitHub's technical errors into something useful. */
+function friendlyError(err) {
+  if (err?.status === 403 && /not accessible|permission|forbidden/i.test(err.message)) return tokenWriteFix();
+  if (err?.status === 401) return h('p', {}, t('GitHub did not accept your token (it may have expired). Go to Settings → “Sign out of this device”, then paste a new token.'));
+  return h('p', {}, err?.message || String(err));
+}
+
 function tokenHelp() {
-  const prefill = 'https://github.com/settings/personal-access-tokens/new?name=Family+archive+admin&description=Lets+the+family+archive+admin+panel+save+changes&expires_in=366&contents=write&actions=read';
+  const owner = location.hostname.endsWith('.github.io') ? location.hostname.split('.')[0] : '';
+  const prefill = `https://github.com/settings/personal-access-tokens/new?name=Family+archive+admin&description=Lets+the+family+archive+admin+panel+save+changes&expires_in=366${owner ? `&target_name=${owner}` : ''}&contents=write&actions=read`;
   return h('details', { class: 'help-box' },
     h('summary', {}, t('How do I get a token? (step by step)')),
     h('ol', {},
       h('li', {}, t('Open '), h('a', { href: prefill, target: '_blank', rel: 'noopener' }, t('GitHub → New fine-grained token')), t(' (sign in if asked).')),
       h('li', {}, t('Token name: "Family archive admin". Expiration: 1 year (put a reminder in your calendar to make a new one).')),
-      h('li', {}, t('Repository access: choose "Only select repositories" and pick '), h('strong', {}, 'family-archive'), '.'),
+      h('li', {}, h('strong', {}, t('Important — Repository access: choose "Only select repositories" and pick ')), h('strong', {}, 'family-archive'), '. ', t('(The default, "Public repositories", can only read and will not be able to save.)')),
       h('li', {}, t('Permissions → Repository permissions: set "Contents" to "Read and write" and "Actions" to "Read-only". ("Metadata: Read-only" is added automatically.) Leave everything else as "No access".')),
       h('li', {}, t('Click "Generate token", then copy the token (it starts with github_pat_). GitHub shows it only once.')),
       h('li', {}, t('Paste it above and click Unlock.'))),
@@ -137,6 +163,22 @@ async function openStore(repo) {
     }
     return clear(view, h('div', { class: 'panel' }, h('h1', {}, t('Could not load the archive')), h('p', {}, err.message),
       h('button', { class: 'btn', onclick: () => location.reload() }, t('Try again'))));
+  }
+  // A saved token that can only read would fail on the first save: explain now.
+  if (!PRACTICE) {
+    let writable = true;
+    try { writable = await repo.canWrite(); } catch { writable = true; }
+    if (!writable) {
+      return clear(view, h('div', { class: 'panel narrow' },
+        h('h1', {}, t('One setting to fix on GitHub')),
+        tokenWriteFix(),
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn btn-primary', onclick: () => openStore(repo) }, t('I fixed it — try again')),
+          h('button', {
+            class: 'btn btn-quiet',
+            onclick: () => { safeStorage.remove('localStorage', TOKEN_KEY); tokenScreen(); },
+          }, t('Use a different token')))));
+    }
   }
   if (!store.hasFamilyPassword) return createPasswordScreen();
   const saved = safeStorage.get('localStorage', FAMILY_KEY) || safeStorage.get('sessionStorage', FAMILY_KEY);
@@ -194,7 +236,13 @@ function createPasswordScreen() {
         await store.createFamilyPassword(a.value);
         safeStorage.set('localStorage', FAMILY_KEY, await exportKey(store.key));
         enterApp();
-      } catch (err) { msg.textContent = err.message; }
+      } catch (err) {
+        // Nothing was saved: start again cleanly once the problem is fixed.
+        store.config.crypto = undefined;
+        store.key = null;
+        store.clearPending();
+        clear(msg, friendlyError(err));
+      }
     },
   },
   h('h1', {}, t('Choose a family password')),
@@ -259,6 +307,7 @@ async function saveAll() {
     const result = await store.save({
       onProgress: ({ done, total }) => { publishState = { state: 'uploading', done, total }; renderSavebar(); },
     });
+    for (const el of banners.querySelectorAll('.save-error')) el.remove();
     if (!result) { publishState = { state: 'idle' }; renderSavebar(); return; }
     publishState = { state: 'publishing', sha: result.sha };
     renderSavebar();
@@ -266,8 +315,10 @@ async function saveAll() {
     watchPublish(result.sha);
     if (!editorDirty) route();
   } catch (err) {
-    publishState = { state: 'error', message: t('Saving failed: {msg}. Your changes are still here — try again.', { msg: err.message }) };
+    publishState = { state: 'error', message: t('Saving failed — your changes are still here. See the message below.') };
     renderSavebar();
+    for (const el of banners.querySelectorAll('.save-error')) el.remove();
+    banners.append(h('div', { class: 'save-error' }, friendlyError(err)));
   }
 }
 
@@ -1816,7 +1867,7 @@ function settingsPage() {
             renderSavebar();
             watchPublish(result.sha);
           } catch (err) {
-            pwMsg.textContent = t('Could not change the password: {msg}', { msg: err.message });
+            clear(pwMsg, friendlyError(err));
           } finally {
             e.target.disabled = false;
           }

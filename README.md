@@ -50,6 +50,7 @@ The admin panel needs a key from GitHub, called a *token*, that allows it to sav
    (Or click your profile photo → **Settings** → **Developer settings** → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.)
 2. **Token name:** `Family archive admin`. **Expiration:** 1 year. Put a reminder in your calendar to make a new token before it expires.
 3. **Repository access:** choose **Only select repositories**, then pick **family-archive**.
+   ⚠️ Don't leave it on the default, **"Public repositories"**: that kind of token can only *read*, and saving fails with *"Resource not accessible by personal access token"*.
 4. **Permissions → Repository permissions:**
    - **Contents:** Read and write
    - **Actions:** Read-only (lets the admin panel show "Live on the site")
@@ -242,6 +243,7 @@ Admin panel → **Settings → Family password**:
 |---|---|
 | Admin says **"Saved, but the site was not updated"** | Your data **is** saved. A safety check failed, so the site kept the last good version. Open the repository's **Actions** tab on GitHub, click the red ✗ run to see which check failed, and ask for help. |
 | Admin asks for the token again | It probably expired. Make a new one ([step 2a](#first-time-setup)). |
+| *"Resource not accessible by personal access token"* or *"This token can read the archive but is not allowed to save"* | The token is read-only. On GitHub → Settings → Developer settings → Fine-grained tokens, click the token → **Edit**. Set Repository access to **Only select repositories → family-archive**, and **Contents: Read and write**, **Actions: Read-only**. Click **Update**. The same token then works; no need to paste it again. |
 | "That family password is not right" | Check spelling and capital letters. If the password was changed, ask for the new one. |
 | The site looks old after saving | Wait a minute, then refresh the page. |
 | Something is wrong with the data | Admin → **History** → **Undo** on the change that caused it. Every earlier version is kept, so nothing is ever truly lost. |

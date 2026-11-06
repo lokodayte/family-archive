@@ -72,6 +72,20 @@ export class GitHubRepo {
     return { sizeKB: info.size, private: info.private, defaultBranch: info.default_branch };
   }
 
+  /**
+   * Can this token save changes? Tries the smallest possible write (an unused,
+   * empty file object that GitHub throws away later). Returns true/false.
+   */
+  async canWrite() {
+    try {
+      await this.api(`${this.base}/git/blobs`, { method: 'POST', body: { content: '', encoding: 'utf-8' } });
+      return true;
+    } catch (e) {
+      if (e.status === 403 || e.status === 404) return false;
+      throw e;
+    }
+  }
+
   async getHead() {
     const ref = await this.api(`${this.base}/git/ref/heads/${this.branch}`);
     return ref.object.sha;

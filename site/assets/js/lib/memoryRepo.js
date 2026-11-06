@@ -16,6 +16,7 @@ export class MemoryRepo {
 
   async checkAccess() { return { sizeKB: this._size, private: false }; }
   async getHead() { return this.headSha; }
+  async canWrite() { return true; }
   async sizeKB() { return this._size; }
 
   async #get(path, ref) {

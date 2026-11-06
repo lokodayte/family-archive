@@ -226,3 +226,13 @@ test('GitHub client reads files and reports missing ones as null', async () => {
   assert.equal(await repo.readText('data/missing.json', 'h1'), null);
   assert.equal(await repo.deployStatus('abc'), 'live');
 });
+
+test('GitHub client can tell whether a token is allowed to save', async () => {
+  const make = (status) => new GitHubRepo({
+    owner: 'me', repo: 'r', token: 'T',
+    fetchImpl: async () => new Response(JSON.stringify(status === 201 ? { sha: 'x' } : { message: 'Resource not accessible by personal access token' }), { status }),
+  });
+  assert.equal(await make(201).canWrite(), true);
+  assert.equal(await make(403).canWrite(), false); // read-only token ("Public repositories")
+  await assert.rejects(make(500).canWrite());
+});
