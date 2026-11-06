@@ -225,7 +225,14 @@ export class GitHubRepo {
       const run = data.workflow_runs?.[0];
       if (!run) return 'waiting';
       if (run.status !== 'completed') return 'running';
-      return run.conclusion === 'success' ? 'live' : 'failed';
+      if (run.conclusion === 'success') return 'live';
+      // Was it the safety checks (tests) or GitHub's publishing service?
+      try {
+        const jobs = await this.api(`${this.base}/actions/runs/${run.id}/jobs`);
+        const testJob = jobs.jobs?.find((j) => j.name === 'test');
+        if (testJob && testJob.conclusion === 'success') return 'publish-failed';
+      } catch { /* fall through */ }
+      return 'failed';
     } catch (e) {
       if (e.status === 403 || e.status === 404) return 'unknown';
       throw e;

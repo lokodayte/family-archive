@@ -41,5 +41,14 @@ jobs:
       - uses: actions/upload-pages-artifact@v4
         with:
           path: site
+      # GitHub's publishing service is occasionally slow: wait longer, and try a second time if needed.
       - id: deployment
         uses: actions/deploy-pages@v4
+        continue-on-error: true
+        with:
+          timeout: 1200000
+      - id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        with:
+          timeout: 1200000

@@ -283,6 +283,7 @@ function renderSavebar() {
     live: h('span', { class: 'status status-ok' }, '✓ ', t('Live on the site'), publishState.at ? ` (${publishState.at})` : ''),
     saved: h('span', { class: 'status status-ok' }, '✓ ', t('Saved. Live in about a minute.')),
     failed: h('span', { class: 'status status-bad' }, '⚠ ', t('Saved, but the site was not updated (a safety check failed). See Help.')),
+    'publish-failed': h('span', { class: 'status status-bad' }, '⚠ ', t('Saved, but GitHub’s publishing service was too slow this time. Your changes are safe; they will appear with your next save, or ask for help.')),
     error: h('span', { class: 'status status-bad' }, '⚠ ', publishState.message || t('Saving failed')),
   }[publishState.state];
 
@@ -332,8 +333,8 @@ function watchPublish(sha) {
     if (publishState.sha !== sha) return; // a newer save took over
     if (s === 'live') {
       publishState = { state: 'live', at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
-    } else if (s === 'failed') {
-      publishState = { state: 'failed' };
+    } else if (s === 'failed' || s === 'publish-failed') {
+      publishState = { state: s };
     } else if (s === 'unknown' || Date.now() - started > 8 * 60_000) {
       publishState = { state: 'saved' };
     } else {
