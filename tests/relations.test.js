@@ -90,3 +90,16 @@ test('timeline puts birth, marriages, children and death in order', () => {
   assert.equal(lifespan(summarize(hov)), 'c. 1880 – 1951');
   assert.equal(lifespan(people.get(P(8))), 'b. 1945');
 });
+
+import { searchPeople } from '../site/assets/js/lib/model.js';
+
+test('search: any alphabet, nicknames, and first/last names rank above patronymics', () => {
+  const people = samplePeople();
+  const first = (q) => searchPeople(people, q).map((p) => p.names.latin?.first);
+  assert.deepEqual(first('hovh'), ['Hovhannes', 'Grigor']); // Grigor matches only via "Hovhannesi"
+  assert.equal(first('Հովհ')[0], 'Hovhannes');
+  assert.equal(first('сэмпл григ')[0], 'Grigor');
+  assert.deepEqual(first('vano'), ['Hovhannes']);
+  assert.deepEqual(first('Demova'), ['Elena']); // maiden name
+  assert.deepEqual(first('zzz'), []);
+});

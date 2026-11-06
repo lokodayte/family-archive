@@ -32,7 +32,9 @@ export class MemoryRepo {
     return typeof v === 'string' ? new TextEncoder().encode(v) : v;
   }
 
-  async commit(message, changes) {
+  async commit(message, changes, { onProgress } = {}) {
+    const total = changes.filter((c) => c.bytes).length;
+    if (total) onProgress?.({ done: total, total });
     for (const c of changes) {
       if (c.delete) {
         if (!(await this.#get(c.path))) throw Object.assign(new Error(`Cannot delete missing file ${c.path}`), { status: 422 });

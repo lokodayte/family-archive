@@ -102,22 +102,38 @@ export const relPeople = (r) => (r.type === 'parent' ? [r.parent, r.child] : [r.
 /**
  * Split everything into what may be published openly and what must be encrypted.
  * A link is public only if every person in it is public.
+ * A photo is public only if it was marked public AND everyone tagged in it is public.
  */
-export function splitIndex(peopleMap, rels, shardCount = DEFAULT_SHARDS) {
+export function splitIndex(peopleMap, rels, shardCount = DEFAULT_SHARDS, photosMap = new Map()) {
   const pub = { v: 1, people: [], rels: [] };
   const shards = Array.from({ length: shardCount }, () => ({ people: [], rels: [] }));
   const isPub = (id) => peopleMap.get(id)?.privacy === 'public';
   const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const photoPrivacy = new Map();
+  for (const ph of photosMap.values()) photoPrivacy.set(ph.id, effectivePhotoPrivacy(ph, peopleMap));
 
   for (const s of [...peopleMap.values()].sort(byId)) {
-    if (s.privacy === 'public') pub.people.push(s);
-    else shards[shardOf(s.id, shardCount)].people.push(s);
+    if (s.privacy === 'public') {
+      // A public person's portrait may come from a family-only photo: keep that link private.
+      if (s.photo && photoPrivacy.get(s.photo) !== 'public') {
+        const shard = shards[shardOf(s.id, shardCount)];
+        (shard.portraits ||= {})[s.id] = s.photo;
+        const { photo, ...rest } = s;
+        pub.people.push(rest);
+      } else pub.people.push(s);
+    } else shards[shardOf(s.id, shardCount)].people.push(s);
   }
   for (const r of [...rels].sort(byId)) {
     const ids = relPeople(r);
     if (!ids.every((id) => peopleMap.has(id))) continue; // link to a deleted person
     if (ids.every(isPub)) pub.rels.push(r);
     else shards[shardOf(r.id, shardCount)].rels.push(r);
+  }
+  for (const ph of [...photosMap.values()].sort(byId)) {
+    const clean = { ...ph, privacy: photoPrivacy.get(ph.id), tags: (ph.tags || []).filter((t) => peopleMap.has(t.person)) };
+    if (!clean.tags.length) delete clean.tags;
+    if (clean.privacy === 'public') (pub.photos ||= []).push(clean);
+    else (shards[shardOf(ph.id, shardCount)].photos ||= []).push(clean);
   }
   return { publicIndex: pub, familyShards: shards };
 }
@@ -127,14 +143,69 @@ export function mergeIndexes(publicIndex, familyShards = []) {
   const people = new Map();
   const rels = [];
   const relIds = new Set();
+  const photos = new Map();
+  const portraits = {};
   for (const part of [publicIndex, ...familyShards]) {
     if (!part) continue;
     for (const s of part.people || []) people.set(s.id, s);
     for (const r of part.rels || []) {
       if (!relIds.has(r.id)) { relIds.add(r.id); rels.push(r); }
     }
+    for (const ph of part.photos || []) photos.set(ph.id, ph);
+    Object.assign(portraits, part.portraits || {});
   }
-  return { people, rels: rels.filter((r) => relPeople(r).every((id) => people.has(id))) };
+  for (const [pid, photoId] of Object.entries(portraits)) {
+    const s = people.get(pid);
+    if (s && photos.has(photoId)) people.set(pid, { ...s, photo: photoId });
+  }
+  for (const [id, s] of people) {
+    if (s.photo && !photos.has(s.photo)) { const { photo, ...rest } = s; people.set(id, rest); }
+  }
+  return { people, rels: rels.filter((r) => relPeople(r).every((id) => people.has(id))), photos };
+}
+
+// ---------- photos & documents ----------
+//   media/public/<id>.<v>.jpg  and  <id>.<v>.t.jpg (thumbnail)      for public photos
+//   media/family/<id>.<v>.bin  and  <id>.<v>.t.bin (encrypted)       for family photos
+//   data/public/photos/<id>.json  or  data/family/photos/<id>.enc   for description and story
+// "v" goes up when an image is replaced, so browsers never show a stale copy.
+
+export const PHOTO_KINDS = { photo: 'Photo', document: 'Document' };
+
+/** Public only if marked public AND every tagged person is public. */
+export function effectivePhotoPrivacy(photo, peopleMap) {
+  if ((photo.choice || photo.privacy) !== 'public') return 'family';
+  return (photo.tags || []).every((t) => !peopleMap.has(t.person) || peopleMap.get(t.person).privacy === 'public')
+    ? 'public' : 'family';
+}
+
+export function mediaPath(photo, privacy, which = 'full') {
+  const ext = privacy === 'public' ? 'jpg' : 'bin';
+  return `media/${privacy}/${photo.id}.${photo.v || 1}${which === 'thumb' ? '.t' : ''}.${ext}`;
+}
+
+export function photoDetailsPath(id, privacy) {
+  return privacy === 'public' ? `data/public/photos/${id}.json` : `data/family/photos/${id}.enc`;
+}
+
+const PHOTO_SUMMARY_FIELDS = ['id', 'choice', 'privacy', 'kind', 'v', 'w', 'h', 'bytes', 'date', 'place', 'title', 'tags'];
+const PHOTO_DETAIL_FIELDS = ['id', 'description', 'story', 'originalName', 'added'];
+
+/** Split a full photo record into the index part and the details part. */
+export function splitPhoto(photo) {
+  const full = compact(photo) || {};
+  const summary = {};
+  for (const f of PHOTO_SUMMARY_FIELDS) if (full[f] !== undefined) summary[f] = full[f];
+  summary.id = photo.id;
+  summary.choice = photo.choice === 'public' ? 'public' : 'family';
+  const details = {};
+  for (const f of PHOTO_DETAIL_FIELDS) if (full[f] !== undefined) details[f] = full[f];
+  details.id = photo.id;
+  return { summary, details };
+}
+
+export function photoTitle(p) {
+  return p?.title || (p?.kind === 'document' ? 'Untitled document' : 'Untitled photo');
 }
 
 export function personPath(id, privacy) {
@@ -200,30 +271,34 @@ export function normalizeText(s) {
     .replace(/[“”"'`’]/g, '');
 }
 
-function searchText(s) {
-  const bits = [];
+function searchTokens(s) {
+  const main = [];
+  const extra = [];
   for (const script of SCRIPTS) {
     const n = s.names?.[script];
-    if (n) bits.push(n.first, n.patronymic, n.last, n.maiden);
+    if (n) { main.push(n.first, n.last); extra.push(n.patronymic, n.maiden); }
   }
-  bits.push(...(s.nicknames || []));
-  return normalizeText(bits.filter(Boolean).join(' '));
+  main.push(...(s.nicknames || []));
+  const split = (arr) => normalizeText(arr.filter(Boolean).join(' ')).split(/\s+/).filter(Boolean);
+  return { main: split(main), extra: split(extra) };
 }
 
-/** Search-as-you-type over all names in all scripts. */
+/** Search-as-you-type over all names in all scripts. First/last names rank above patronymics. */
 export function searchPeople(people, query, limit = 20) {
   const words = normalizeText(query).split(/\s+/).filter(Boolean);
   const list = people instanceof Map ? [...people.values()] : people;
   if (!words.length) return [];
   const results = [];
   for (const s of list) {
-    const hay = searchText(s);
-    const tokens = hay.split(/\s+/);
+    const { main, extra } = searchTokens(s);
+    const hay = [...main, ...extra].join(' ');
     let score = 0;
     let all = true;
     for (const w of words) {
-      if (tokens.some((t) => t === w)) score += 3;
-      else if (tokens.some((t) => t.startsWith(w))) score += 2;
+      if (main.includes(w)) score += 6;
+      else if (main.some((t) => t.startsWith(w))) score += 4;
+      else if (extra.includes(w)) score += 3;
+      else if (extra.some((t) => t.startsWith(w))) score += 2;
       else if (hay.includes(w)) score += 1;
       else { all = false; break; }
     }

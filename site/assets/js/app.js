@@ -10,6 +10,9 @@ import { siblings } from './lib/relations.js';
 import { buildTimeline, lifespan, EVENT_TYPES } from './lib/timeline.js';
 import { WrongPasswordError } from './lib/crypto.js';
 import { renderTree } from './tree.js';
+import { lazyImage, tagLayer } from './lib/media.js';
+import { filterPhotos, galleryFacets, sortPhotos } from './lib/gallery.js';
+import { photoTitle } from './lib/model.js';
 
 const archive = new Archive('');
 const view = document.getElementById('view');
@@ -18,13 +21,25 @@ let currentTree = null;
 
 // ---------- small pieces ----------
 
+/** Profile photo cropped around the person's face, or their initials. */
+function avatar(s, className = 'monogram') {
+  const ph = s?.photo && archive.photos.get(s.photo);
+  if (ph && (ph.privacy === 'public' || archive.unlocked)) {
+    const tag = ph.tags?.find((tg) => tg.person === s.id);
+    const img = lazyImage(() => archive.imageURL(ph, 'thumb'), { alt: '', className: 'avatar-img' });
+    if (tag) img.style.objectPosition = `${tag.x * 100}% ${tag.y * 100}%`;
+    return h('span', { class: `${className} has-photo`, 'aria-hidden': 'true' }, img);
+  }
+  return h('span', { class: className, 'aria-hidden': 'true' }, initials(s));
+}
+
 const link = (id, text) => h('a', { href: `#/person/${id}` }, text ?? displayName(archive.people.get(id)));
 
 function personChip(id, extra) {
   const s = archive.people.get(id);
   if (!s) return null;
   return h('a', { class: `chip${s.placeholder ? ' chip-placeholder' : ''}`, href: `#/person/${id}` },
-    h('span', { class: 'monogram small', 'aria-hidden': 'true' }, initials(s)),
+    avatar(s, 'monogram small'),
     h('span', { class: 'chip-text' },
       h('span', { class: 'chip-name' }, displayName(s)),
       h('span', { class: 'chip-dates' }, [lifespan(s), extra].filter(Boolean).join(' · '))));
@@ -39,7 +54,7 @@ function badges(s) {
 
 function personCard(s) {
   return h('a', { class: `person-card${s.placeholder ? ' is-placeholder' : ''}`, href: `#/person/${s.id}` },
-    h('span', { class: 'monogram', 'aria-hidden': 'true' }, initials(s)),
+    avatar(s),
     h('span', { class: 'person-card-text' },
       h('span', { class: 'person-card-name' }, displayName(s)),
       h('span', { class: 'person-card-dates' }, lifespan(s) || ' '),
@@ -87,6 +102,7 @@ function homePage() {
       results,
       h('p', { class: 'muted small' }, t('{n} people in the archive', { n: all.length }))),
     lockedNotice(),
+    albumStrip(),
     earliest.length && h('section', {},
       h('h2', { class: 'section-title' }, t('Begin with the earliest generations')),
       h('div', { class: 'card-grid' }, earliest.map(personCard)),
@@ -231,7 +247,7 @@ async function profilePage(id) {
   return [
     h('nav', { class: 'crumbs' }, h('a', { href: '#/people' }, t('Everyone')), ' / ', displayName(p)),
     h('header', { class: 'profile-head' },
-      h('div', { class: 'portrait', 'aria-hidden': 'true' }, h('span', {}, initials(p))),
+      portraitBox(p),
       h('div', {},
         h('h1', {}, displayName(p)),
         others.length ? h('p', { class: 'other-names' }, others.join(' · ')) : null,
@@ -248,7 +264,8 @@ async function profilePage(id) {
         p.bio ? h('section', { class: 'panel prose-panel' }, h('h2', {}, t('Biography')), paragraphs(p.bio)) : null,
         p.stories?.length ? h('section', { class: 'panel prose-panel' }, h('h2', {}, t('Stories')),
           p.stories.map((st) => h('article', { class: 'story' }, st.title && h('h3', {}, st.title), paragraphs(st.text)))) : null,
-        timelineSection(p)),
+        timelineSection(p),
+        personPhotosSection(id)),
       h('aside', { class: 'profile-side' },
         h('section', { class: 'panel' }, h('h2', {}, t('Facts')),
           h('dl', { class: 'facts' },
@@ -321,6 +338,167 @@ function treePage(id) {
   ];
 }
 
+// ---------- photos ----------
+
+function visiblePhotos() {
+  return [...archive.photos.values()];
+}
+
+function photoTile(ph, query = '') {
+  return h('a', { class: 'photo-tile', href: `#/photo/${ph.id}${query}`, title: photoTitle(ph) },
+    lazyImage(() => archive.imageURL(ph, 'thumb'), { alt: photoTitle(ph) }),
+    h('span', { class: 'photo-tile-caption' },
+      h('span', { class: 'photo-tile-title' }, photoTitle(ph)),
+      h('span', { class: 'photo-tile-date' }, [formatDate(ph.date), ph.place].filter(Boolean).join(' · '))));
+}
+
+function portraitBox(p) {
+  const ph = p.photo && archive.photos.get(p.photo);
+  if (ph) {
+    const tag = ph.tags?.find((tg) => tg.person === p.id);
+    const img = lazyImage(() => archive.imageURL(ph, 'thumb'), { alt: displayName(p), className: 'portrait-img', eager: true });
+    if (tag) img.style.objectPosition = `${tag.x * 100}% ${tag.y * 100}%`;
+    return h('a', { class: 'portrait has-photo', href: `#/photo/${ph.id}`, title: t('Open photo') }, img);
+  }
+  return h('div', { class: 'portrait', 'aria-hidden': 'true' }, h('span', {}, initials(p)));
+}
+
+function albumStrip() {
+  const photos = sortPhotos(visiblePhotos()).filter((p) => p.kind !== 'document');
+  if (!photos.length) return null;
+  // A changing selection, spread across the years.
+  const step = Math.max(1, Math.floor(photos.length / 8));
+  const pick = photos.filter((_, i) => i % step === 0).slice(0, 8);
+  return h('section', {},
+    h('h2', { class: 'section-title' }, t('From the album')),
+    h('div', { class: 'album-strip' }, pick.map((ph) => photoTile(ph))),
+    h('p', {}, h('a', { href: '#/gallery', class: 'btn btn-quiet' }, t('Open the gallery →'))));
+}
+
+function personPhotosSection(id) {
+  const photos = sortPhotos(visiblePhotos().filter((p) => p.tags?.some((tg) => tg.person === id)));
+  if (!photos.length) return null;
+  return h('section', { class: 'panel' },
+    h('h2', {}, t('Photos and documents')),
+    h('div', { class: 'photo-tiles' }, photos.slice(0, 12).map((ph) => photoTile(ph, `?person=${id}`))),
+    photos.length > 12 && h('p', {}, h('a', { href: `#/gallery?person=${id}`, class: 'btn btn-quiet' }, t('See all {n} →', { n: photos.length }))));
+}
+
+const PAGE_SIZE = 60;
+
+function readQuery() {
+  const q = new URLSearchParams((location.hash.split('?')[1] || ''));
+  return Object.fromEntries(q.entries());
+}
+
+function galleryPage() {
+  const filters = readQuery();
+  const all = visiblePhotos();
+  const facets = galleryFacets(all);
+  const list = filterPhotos(all, filters);
+  const setFilter = (k, v) => {
+    const next = { ...filters, [k]: v };
+    if (!v) delete next[k];
+    const qs = new URLSearchParams(next).toString();
+    location.hash = `#/gallery${qs ? `?${qs}` : ''}`;
+  };
+  const sel = (label, key, options) => h('label', { class: 'gen-select' }, label, ' ',
+    h('select', { value: filters[key] || '', onchange: (e) => setFilter(key, e.target.value) },
+      h('option', { value: '' }, t('All')), options));
+  const people = [...facets.people].filter(([pid]) => archive.people.has(pid))
+    .sort((a, b) => displayName(archive.people.get(a[0])).localeCompare(displayName(archive.people.get(b[0]))));
+  const grid = h('div', { class: 'photo-tiles gallery-grid' });
+  let shown = 0;
+  const qs = location.hash.split('?')[1];
+  const addPage = () => {
+    grid.append(...list.slice(shown, shown + PAGE_SIZE).map((ph) => photoTile(ph, qs ? `?${qs}` : '')));
+    shown += PAGE_SIZE;
+    if (shown >= list.length) sentinel.remove();
+  };
+  // Load more automatically when scrolling near the end.
+  const sentinel = h('div', { class: 'sentinel' });
+  const io = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) addPage(); }, { rootMargin: '600px' });
+  queueMicrotask(() => io.observe(sentinel));
+  addPage();
+  return [
+    h('h1', {}, t('Gallery')),
+    lockedNotice(),
+    all.length ? h('div', { class: 'gallery-filters' },
+      sel(t('Person'), 'person', people.map(([pid, n]) => h('option', { value: pid }, `${displayName(archive.people.get(pid))} (${n})`))),
+      sel(t('Place'), 'place', facets.places.map((pl) => h('option', { value: pl.label }, `${pl.label} (${pl.count})`))),
+      sel(t('Decade'), 'decade', [
+        ...facets.decades.map((d) => h('option', { value: String(d.decade) }, `${d.decade}s (${d.count})`)),
+        facets.undated ? h('option', { value: 'undated' }, `${t('No date')} (${facets.undated})`) : null,
+      ]),
+      sel(t('Kind'), 'kind', [h('option', { value: 'photo' }, t('Photos')), h('option', { value: 'document' }, t('Documents'))]),
+      Object.keys(filters).length ? h('a', { class: 'btn btn-quiet btn-small', href: '#/gallery' }, t('Clear filters')) : null) : null,
+    h('p', { class: 'muted small' }, all.length ? t('{n} shown', { n: list.length }) : t('No photos yet.')),
+    grid,
+    sentinel,
+  ];
+}
+
+async function photoPage(id) {
+  const ph = archive.photos.get(id);
+  if (!ph) {
+    return [h('h1', {}, t('Photo not found')),
+      h('p', {}, archive.unlocked || !archive.hasFamilyData ? t('This photo is not in the archive.') : t('This photo may be private to the family.')),
+      lockedNotice()];
+  }
+  const details = await archive.getPhotoDetails(id);
+  const filters = readQuery();
+  const qs = location.hash.split('?')[1];
+  const list = filterPhotos(visiblePhotos(), filters);
+  const i = list.findIndex((p) => p.id === id);
+  const prev = i > 0 ? list[i - 1] : null;
+  const next = i >= 0 && i < list.length - 1 ? list[i + 1] : null;
+  const suffix = qs ? `?${qs}` : '';
+  const tags = (ph.tags || []).filter((tg) => archive.people.has(tg.person));
+
+  const img = h('img', { class: 'photo-full', alt: photoTitle(ph), draggable: 'false' });
+  archive.imageURL(ph, 'full').then((url) => { if (url) img.src = url; });
+  const frame = h('div', { class: 'photo-frame show-labels' }, img,
+    tagLayer(tags, { nameOf: (pid) => displayName(archive.people.get(pid)), hrefOf: (pid) => `#/person/${pid}`, highlight: filters.person }));
+  const toggle = h('label', { class: 'check small' }, h('input', {
+    type: 'checkbox', checked: true, onchange: (e) => frame.classList.toggle('hide-tags', !e.target.checked),
+  }), t('Show names on the photo'));
+
+  const email = archive.familySettings?.correctionEmail;
+  const mail = email ? h('a', {
+    class: 'btn btn-quiet btn-small',
+    href: `mailto:${email}?subject=${encodeURIComponent(t('Family archive photo: {title}', { title: photoTitle(ph) }))}&body=${encodeURIComponent(`${t('Photo')}: ${photoTitle(ph)} (${id})\n${location.href}\n\n${t('Who is in it, when and where was it taken, or what is the story?')}\n\n\n${t('Your name')}:`)}`,
+  }, '✉ ', t('Know something about this photo?')) : null;
+
+  // Arrow keys move between photos.
+  const onKey = (e) => {
+    if (!location.hash.startsWith(`#/photo/${id}`)) { window.removeEventListener('keydown', onKey); return; }
+    if (e.target.matches?.('input, textarea, select')) return;
+    if (e.key === 'ArrowLeft' && prev) location.hash = `#/photo/${prev.id}${suffix}`;
+    if (e.key === 'ArrowRight' && next) location.hash = `#/photo/${next.id}${suffix}`;
+  };
+  window.addEventListener('keydown', onKey);
+
+  return [
+    h('nav', { class: 'crumbs' }, h('a', { href: `#/gallery${suffix}` }, t('Gallery')), ' / ', photoTitle(ph)),
+    h('div', { class: 'viewer' },
+      h('div', { class: 'viewer-image' },
+        frame,
+        h('div', { class: 'viewer-nav' },
+          prev ? h('a', { class: 'btn btn-quiet btn-small', href: `#/photo/${prev.id}${suffix}` }, '← ', t('Previous')) : h('span'),
+          i >= 0 ? h('span', { class: 'muted small' }, `${i + 1} / ${list.length}`) : null,
+          next ? h('a', { class: 'btn btn-quiet btn-small', href: `#/photo/${next.id}${suffix}` }, t('Next'), ' →') : h('span'))),
+      h('div', { class: 'viewer-info' },
+        h('h1', {}, photoTitle(ph)),
+        h('p', { class: 'lifespan' }, [formatDate(ph.date), ph.place].filter(Boolean).join(' · ')),
+        ph.privacy === 'family' && h('span', { class: 'badge badge-family' }, t('Family only')),
+        details.description && h('div', { class: 'panel prose-panel' }, paragraphs(details.description)),
+        details.story && h('section', { class: 'panel prose-panel' }, h('h2', {}, t('The story')), paragraphs(details.story)),
+        tags.length ? h('section', { class: 'panel' }, h('h2', {}, t('In this photo')),
+          h('div', { class: 'chips' }, tags.map((tg) => personChip(tg.person))), toggle) : null,
+        h('div', { class: 'actions' }, mail))),
+  ];
+}
+
 // ---------- unlock ----------
 
 function openUnlock() {
@@ -372,13 +550,17 @@ function updateHeader() {
 // ---------- router ----------
 
 async function route() {
-  const [, page, id] = (location.hash || '#/').split('/');
-  document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === (page || 'home')));
+  const [, rawPage, rawId] = (location.hash.split('?')[0] || '#/').split('/');
+  const page = rawPage;
+  const id = rawId;
+  document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === ({ person: 'people', photo: 'gallery' }[page] || page || 'home')));
   let content;
   try {
     if (page === 'person' && id) content = await profilePage(decodeURIComponent(id));
     else if (page === 'people') content = peoplePage();
     else if (page === 'tree') content = treePage(id && decodeURIComponent(id));
+    else if (page === 'gallery') content = galleryPage();
+    else if (page === 'photo' && id) content = await photoPage(decodeURIComponent(id));
     else content = homePage();
   } catch (err) {
     console.error(err);
@@ -386,7 +568,7 @@ async function route() {
   }
   if (page !== 'tree') { currentTree?.destroy(); currentTree = null; }
   clear(view, content);
-  view.classList.toggle('wide', page === 'tree');
+  view.classList.toggle('wide', page === 'tree' || page === 'photo' || page === 'gallery');
   const title = archive.config.siteTitle || t('Our Family Archive');
   const heading = view.querySelector('h1')?.textContent;
   document.title = heading && heading !== title ? `${heading} — ${title}` : title;

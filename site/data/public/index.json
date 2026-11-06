@@ -38,7 +38,8 @@
      "date": "1951-03-12"
     },
     "place": "Yerevan"
-   }
+   },
+   "photo": "f4l6b1t5b2u"
   },
   {
    "id": "psample0002",
@@ -134,7 +135,8 @@
      "date": "1988"
     },
     "place": "Yerevan"
-   }
+   },
+   "photo": "f4l6b1t5b2u"
   },
   {
    "id": "psample0005",
@@ -217,6 +219,63 @@
    "parent": "psample0003",
    "child": "psample0005",
    "kind": "birth"
+  }
+ ],
+ "photos": [
+  {
+   "id": "f11041x006y",
+   "choice": "public",
+   "v": 1,
+   "w": 1500,
+   "h": 1100,
+   "bytes": 223864,
+   "date": {
+    "type": "between",
+    "from": "1925",
+    "to": "1929"
+   },
+   "place": "Yerevan",
+   "title": "Anahit and Lusine (sample)",
+   "tags": [
+    {
+     "person": "psample0003",
+     "x": 0.4,
+     "y": 0.42
+    },
+    {
+     "person": "psample0005",
+     "x": 0.6,
+     "y": 0.42
+    }
+   ],
+   "privacy": "public"
+  },
+  {
+   "id": "f4l6b1t5b2u",
+   "choice": "public",
+   "v": 1,
+   "w": 1600,
+   "h": 1200,
+   "bytes": 249431,
+   "date": {
+    "type": "about",
+    "date": "1925"
+   },
+   "place": "Yerevan",
+   "title": "At the forge (sample)",
+   "tags": [
+    {
+     "person": "psample0001",
+     "x": 0.35,
+     "y": 0.42
+    },
+    {
+     "person": "psample0004",
+     "x": 0.65,
+     "y": 0.42
+    }
+   ],
+   "privacy": "public"
   }
  ]
 }

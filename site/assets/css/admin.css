@@ -110,3 +110,39 @@
   .admin-row .badges { display: none; }
   .admin-row .badges:has(.badge-unsaved) { display: flex; }
 }
+
+/* ---------- photos (admin) ---------- */
+.kind-choice { display: flex; flex-wrap: wrap; gap: 4px 20px; }
+.kind-choice legend { width: 100%; }
+.dropzone {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center;
+  padding: 28px 20px; margin: 4px 0 12px; border: 2px dashed var(--line); border-radius: var(--radius);
+  background: var(--card); cursor: pointer; transition: border-color .15s, background .15s;
+}
+.dropzone:hover, .dropzone.over { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone-icon { font-size: 2rem; color: var(--accent); line-height: 1; }
+.upload-progress { display: flex; align-items: center; gap: 8px; min-height: 1.5em; font-size: .9rem; color: var(--ink-soft); margin-bottom: 8px; }
+.batch-panel { border-color: var(--accent); }
+.photo-editor { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 20px; align-items: start; margin-top: 12px; }
+.photo-stage { background: var(--card); border: 1px solid var(--card-edge); border-radius: var(--radius); padding: 10px; text-align: center; }
+.tagger {
+  position: absolute; transform: translate(-50%, 18px); z-index: 12; width: min(300px, 80vw);
+  background: var(--card); border: 1px solid var(--card-edge); border-radius: 12px; padding: 10px 12px;
+  box-shadow: 0 12px 30px rgba(31, 42, 46, .2); line-height: 1.4; text-align: left;
+}
+.tagger .picker { margin: 6px 0 8px; }
+.portrait-choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
+.portrait-choice {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px; cursor: pointer;
+  border: 2px solid transparent; border-radius: 10px; text-align: center;
+}
+.portrait-choice.on { border-color: var(--accent); background: var(--accent-soft); }
+.portrait-choice input { position: absolute; opacity: 0; pointer-events: none; }
+.portrait-choice img, .portrait-none { width: 80px; height: 96px; object-fit: cover; border-radius: 6px; }
+.portrait-none { display: grid; place-items: center; background: var(--paper-deep); color: var(--ink-soft); font-weight: 600; }
+.portrait-choice .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+@media (max-width: 760px) {
+  .photo-editor { grid-template-columns: 1fr; }
+  .photo-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+}

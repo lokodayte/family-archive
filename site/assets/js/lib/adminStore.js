@@ -1,21 +1,27 @@
 // Everything the admin panel does with data: load, edit, group edits, save as one commit.
 import {
   createKeyring, unlockKeyring, wrapKey, generateDataKey, encryptJSON, decryptJSON,
-  DEFAULT_ITERATIONS,
+  encryptBytes, decryptBytes, DEFAULT_ITERATIONS,
 } from './crypto.js';
 import {
   summarize, normalizePerson, splitIndex, mergeIndexes, personPath, familyShardPath,
   PUBLIC_INDEX_PATH, CONFIG_PATH, SETTINGS_PATH, DEFAULT_SHARDS, relPeople, displayName,
-  effectivePrivacy,
+  effectivePrivacy, effectivePhotoPrivacy, mediaPath, photoDetailsPath, splitPhoto, newId,
 } from './model.js';
 import { buildGraph, findProblems, PROBLEM_TEXT } from './relations.js';
 
 const involves = (r, id) => relPeople(r).includes(id);
 
 export class AdminStore {
-  constructor(repo, { iterations = DEFAULT_ITERATIONS } = {}) {
+  /**
+   * @param repo  GitHubRepo or MemoryRepo
+   * @param opts.siteLoader  optional async (path) => Uint8Array|null, reads published files
+   *                         (faster than the GitHub API for images)
+   */
+  constructor(repo, { iterations = DEFAULT_ITERATIONS, siteLoader } = {}) {
     this.repo = repo;
     this.iterations = iterations;
+    this.siteLoader = siteLoader;
     this.key = null;
     this.reset();
   }
@@ -28,10 +34,14 @@ export class AdminStore {
     this.familySettings = {};
     this.people = new Map();
     this.rels = [];
+    this.photos = new Map();
     this.prevPrivacy = new Map();
+    this.prevPhotos = new Map(); // photo summaries as they are on GitHub right now
     this.personCache = new Map();
-    this.pending = new Map(); // id -> { person } or { deleted: true }
-    this.ops = []; // [{ text, public }]
+    this.photoDetailsCache = new Map();
+    this.pending = new Map(); // person id -> { person } or { deleted: true }
+    this.pendingPhotos = new Map(); // photo id -> { details?, image?, thumb? } or { deleted: true }
+    this.ops = []; // [{ text, public, photo }]
     this.settingsDirty = false;
     this.configDirty = false;
     this.lastPublicText = null;
@@ -42,6 +52,13 @@ export class AdminStore {
   get hasFamilyPassword() { return !!this.config.crypto; }
   get pendingCount() { return this.ops.length; }
   get graph() { return buildGraph(this.rels); }
+
+  /** Bytes of new images waiting to be uploaded. */
+  get pendingUploadBytes() {
+    let n = 0;
+    for (const p of this.pendingPhotos.values()) n += (p.image?.length || 0) + (p.thumb?.length || 0);
+    return n;
+  }
 
   // ---------- loading ----------
 
@@ -60,7 +77,9 @@ export class AdminStore {
     const merged = mergeIndexes(this.publicIndex, this.familyShards);
     this.people = merged.people;
     this.rels = merged.rels;
+    this.photos = merged.photos;
     this.prevPrivacy = new Map([...this.people.values()].map((s) => [s.id, s.privacy]));
+    this.prevPhotos = new Map([...this.photos.values()].map((s) => [s.id, structuredClone(s)]));
   }
 
   /** First-time setup: choose the family password. Saved immediately. */
@@ -83,7 +102,6 @@ export class AdminStore {
   }
 
   async useKey(key) {
-    // Try the key on the first family file before accepting it.
     const shards = [];
     const texts = await Promise.all(
       Array.from({ length: this.shardCount }, (_, i) => this.repo.readText(familyShardPath(i), this.head)),
@@ -101,23 +119,77 @@ export class AdminStore {
 
   async getPerson(id) {
     const p = this.pending.get(id);
-    if (p?.person) return structuredClone(p.person);
-    if (this.personCache.has(id)) return structuredClone(this.personCache.get(id));
-    const privacy = this.prevPrivacy.get(id);
-    if (!privacy) return null;
-    const text = await this.repo.readText(personPath(id, privacy), this.head);
     let person;
-    if (!text) person = { ...structuredClone(this.people.get(id)) }; // only in index
-    else person = privacy === 'public' ? JSON.parse(text) : await decryptJSON(this.key, text);
-    this.personCache.set(id, person);
-    return structuredClone(person);
+    if (p?.person) person = structuredClone(p.person);
+    else if (this.personCache.has(id)) person = structuredClone(this.personCache.get(id));
+    else {
+      const privacy = this.prevPrivacy.get(id);
+      if (!privacy) return null;
+      const text = await this.repo.readText(personPath(id, privacy), this.head);
+      if (!text) person = { ...structuredClone(this.people.get(id)) }; // only in index
+      else person = privacy === 'public' ? JSON.parse(text) : await decryptJSON(this.key, text);
+      this.personCache.set(id, person);
+      person = structuredClone(person);
+    }
+    // The index is the source of truth for the profile photo.
+    const photo = this.people.get(id)?.photo;
+    if (photo) person.photo = photo; else delete person.photo;
+    return person;
   }
 
   relsOf(id) {
     return this.rels.filter((r) => involves(r, id));
   }
 
-  // ---------- editing (kept in memory until Save) ----------
+  // ---------- reading photos ----------
+
+  photoPrivacy(summary) {
+    return effectivePhotoPrivacy(summary, this.people);
+  }
+
+  async getPhotoDetails(id) {
+    const p = this.pendingPhotos.get(id);
+    if (p?.details) return structuredClone(p.details);
+    if (this.photoDetailsCache.has(id)) return structuredClone(this.photoDetailsCache.get(id));
+    const prev = this.prevPhotos.get(id);
+    if (!prev) return { id };
+    const text = await this.repo.readText(photoDetailsPath(id, prev.privacy), this.head);
+    let details = { id };
+    if (text) details = prev.privacy === 'public' ? JSON.parse(text) : await decryptJSON(this.key, text);
+    this.photoDetailsCache.set(id, details);
+    return structuredClone(details);
+  }
+
+  /** Image bytes (readable JPEG) for a photo: 'full' or 'thumb'. */
+  async getImageBytes(id, which = 'full') {
+    const p = this.pendingPhotos.get(id);
+    if (p?.image) return which === 'thumb' ? p.thumb : p.image;
+    const prev = this.prevPhotos.get(id);
+    if (!prev) return null;
+    return this.#readMedia(prev, which, { preferSite: true });
+  }
+
+  async #readMedia(summary, which, { preferSite = false } = {}) {
+    const path = mediaPath(summary, summary.privacy, which);
+    const open = (bytes) => (summary.privacy === 'family' ? decryptBytes(this.key, bytes) : bytes);
+    if (preferSite && this.siteLoader) {
+      // The published copy is quicker to get; if it is missing or out of date, ask GitHub.
+      try {
+        const bytes = await this.siteLoader(path);
+        if (bytes) return await open(bytes);
+      } catch { /* fall back below */ }
+    }
+    const bytes = await this.repo.readBytes(path, this.head);
+    return bytes ? open(bytes) : null;
+  }
+
+  async #seal(bytes, privacy, key = this.key) {
+    if (privacy === 'public') return bytes;
+    if (!key) throw new Error('Unlock with the family password first.');
+    return encryptBytes(key, bytes);
+  }
+
+  // ---------- editing people (kept in memory until Save) ----------
 
   /**
    * Check a person edit before keeping it. Returns a list of problem messages.
@@ -141,6 +213,7 @@ export class AdminStore {
 
   #stage(person, text) {
     const clean = normalizePerson(person);
+    if (clean.photo && !this.photos.has(clean.photo)) delete clean.photo;
     this.pending.set(clean.id, { person: clean });
     this.people.set(clean.id, summarize(clean));
     this.ops.push({ text, public: effectivePrivacy(clean) === 'public' });
@@ -152,10 +225,103 @@ export class AdminStore {
     const wasSaved = this.prevPrivacy.has(id);
     this.people.delete(id);
     this.rels = this.rels.filter((r) => !involves(r, id));
+    // Remove their name tags from photos.
+    for (const [pid, ph] of this.photos) {
+      if (ph.tags?.some((t) => t.person === id)) this.photos.set(pid, { ...ph, tags: ph.tags.filter((t) => t.person !== id) });
+    }
     if (wasSaved) this.pending.set(id, { deleted: true });
     else this.pending.delete(id);
     this.ops.push({ text: `Deleted ${displayName(s)}`, public: s.privacy === 'public' });
   }
+
+  /** Set (or clear, with null) a person's profile photo. */
+  setPortrait(personId, photoId) {
+    const s = this.people.get(personId);
+    if (!s) return;
+    const next = { ...s };
+    if (photoId) next.photo = photoId; else delete next.photo;
+    this.people.set(personId, next);
+    const pend = this.pending.get(personId);
+    if (pend?.person) { if (photoId) pend.person.photo = photoId; else delete pend.person.photo; }
+    this.ops.push({ text: `Changed profile photo of ${displayName(s)}`, public: s.privacy === 'public' });
+  }
+
+  // ---------- editing photos ----------
+
+  /**
+   * Add a new photo or document.
+   * photo: { kind, title, date, place, choice, tags, description, story, originalName }
+   * image/thumb: JPEG bytes; w/h: pixel size of the full image
+   */
+  addPhoto(photo, { image, thumb, w, h }) {
+    const id = photo.id || newId('f');
+    const { summary, details } = splitPhoto({
+      ...photo, id, v: 1, w, h, bytes: image.length + thumb.length, added: new Date().toISOString().slice(0, 10),
+    });
+    summary.privacy = this.photoPrivacy(summary);
+    this.photos.set(id, summary);
+    this.pendingPhotos.set(id, { details, image, thumb });
+    this.ops.push({ text: 'Added a photo', photo: true, photoId: id });
+    return id;
+  }
+
+  /** Change a photo's information (title, date, tags, privacy, story...). */
+  updatePhoto(photo) {
+    const old = this.photos.get(photo.id);
+    if (!old) throw new Error('Unknown photo');
+    const { summary, details } = splitPhoto({ ...photo, v: old.v, w: old.w, h: old.h, bytes: old.bytes });
+    summary.privacy = this.photoPrivacy(summary);
+    this.photos.set(photo.id, summary);
+    const pend = this.pendingPhotos.get(photo.id) || {};
+    this.pendingPhotos.set(photo.id, { ...pend, details });
+    // A photo that isn't saved yet is already counted as "Added a photo".
+    if (this.prevPhotos.has(photo.id)) this.ops.push({ text: 'Edited a photo', photo: true });
+  }
+
+  /** Swap in a new image (e.g. a better scan, or rotated). The old one stays in the history. */
+  replacePhotoImage(id, { image, thumb, w, h }) {
+    const old = this.photos.get(id);
+    if (!old) throw new Error('Unknown photo');
+    const prev = this.prevPhotos.get(id);
+    const v = prev ? (prev.v || 1) + 1 : old.v || 1;
+    this.photos.set(id, { ...old, v, w, h, bytes: image.length + thumb.length });
+    const pend = this.pendingPhotos.get(id) || {};
+    this.pendingPhotos.set(id, { ...pend, image, thumb });
+    if (prev) this.ops.push({ text: 'Replaced a photo image', photo: true });
+  }
+
+  /** How much storage the image that would be replaced uses (stays in history). */
+  replacedBytes(id) {
+    return this.prevPhotos.get(id)?.bytes || 0;
+  }
+
+  deletePhoto(id) {
+    if (!this.photos.has(id)) return;
+    this.photos.delete(id);
+    for (const [pid, s] of this.people) {
+      if (s.photo === id) {
+        const { photo, ...rest } = s;
+        this.people.set(pid, rest);
+        const pend = this.pending.get(pid);
+        if (pend?.person) delete pend.person.photo;
+      }
+    }
+    if (this.prevPhotos.has(id)) {
+      this.pendingPhotos.set(id, { deleted: true });
+      this.ops.push({ text: 'Deleted a photo', photo: true });
+    } else {
+      // Never saved: just forget it (and its "Added a photo" line).
+      this.pendingPhotos.delete(id);
+      const i = this.ops.findIndex((o) => o.photoId === id);
+      if (i >= 0) this.ops.splice(i, 1);
+    }
+  }
+
+  photosOf(personId) {
+    return [...this.photos.values()].filter((p) => p.tags?.some((t) => t.person === personId));
+  }
+
+  // ---------- settings ----------
 
   setFamilySettings(settings) {
     this.familySettings = { ...this.familySettings, ...settings };
@@ -172,10 +338,12 @@ export class AdminStore {
   // ---------- saving ----------
 
   commitMessage() {
-    const pub = this.ops.filter((o) => o.public).map((o) => o.text);
-    const fam = this.ops.length - pub.length;
-    const parts = [...pub];
     // Never put family-only names in commit messages: the repository is public.
+    const pub = this.ops.filter((o) => o.public && !o.photo).map((o) => o.text);
+    const photos = this.ops.filter((o) => o.photo).length;
+    const fam = this.ops.length - pub.length - photos;
+    const parts = [...pub];
+    if (photos) parts.push(`${photos} photo change${photos === 1 ? '' : 's'}`);
     if (fam) parts.push(`${fam} family-only change${fam === 1 ? '' : 's'}`);
     return parts.length ? `Archive: ${parts.join('; ')}` : 'Archive update';
   }
@@ -183,6 +351,7 @@ export class AdminStore {
   /** Work out every file that must be written or deleted. */
   async buildChanges() {
     const changes = [];
+    // People
     for (const [id, p] of this.pending) {
       const prev = this.prevPrivacy.get(id);
       if (p.deleted) {
@@ -191,14 +360,60 @@ export class AdminStore {
       }
       const priv = effectivePrivacy(p.person);
       if (priv === 'family' && !this.key) throw new Error('Unlock with the family password first.');
+      const { photo, ...withoutPhoto } = p.person; // the index holds the profile photo
       const content = priv === 'public'
-        ? JSON.stringify(p.person, null, 1)
-        : await encryptJSON(this.key, p.person);
+        ? JSON.stringify(withoutPhoto, null, 1)
+        : await encryptJSON(this.key, withoutPhoto);
       changes.push({ path: personPath(id, priv), content });
       if (prev && prev !== priv) changes.push({ path: personPath(id, prev), delete: true });
     }
 
-    const { publicIndex, familyShards } = splitIndex(this.people, this.rels, this.shardCount);
+    // Photos: new images, replaced images, moves between public and family, details
+    const finalPhotos = new Map();
+    for (const [id, s] of this.photos) {
+      const eff = this.photoPrivacy(s);
+      const cur = { ...s, privacy: eff };
+      finalPhotos.set(id, cur);
+      const prev = this.prevPhotos.get(id);
+      const pend = this.pendingPhotos.get(id);
+      const moved = !!prev && prev.privacy !== eff;
+      const oldMedia = () => prev ? [
+        { path: mediaPath(prev, prev.privacy, 'full'), delete: true },
+        { path: mediaPath(prev, prev.privacy, 'thumb'), delete: true },
+      ] : [];
+      if (pend?.image) {
+        changes.push({ path: mediaPath(cur, eff, 'full'), bytes: await this.#seal(pend.image, eff) });
+        changes.push({ path: mediaPath(cur, eff, 'thumb'), bytes: await this.#seal(pend.thumb, eff) });
+        if (prev && (moved || (prev.v || 1) !== (cur.v || 1))) changes.push(...oldMedia());
+      } else if (moved) {
+        for (const which of ['full', 'thumb']) {
+          const bytes = await this.#readMedia(prev, which);
+          if (bytes) changes.push({ path: mediaPath(cur, eff, which), bytes: await this.#seal(bytes, eff) });
+        }
+        changes.push(...oldMedia());
+      }
+      if (pend?.details || moved || !prev) {
+        const details = pend?.details || await this.getPhotoDetails(id);
+        changes.push({
+          path: photoDetailsPath(id, eff),
+          content: eff === 'public' ? JSON.stringify(details, null, 1) : await encryptJSON(this.key, details),
+        });
+        if (moved) changes.push({ path: photoDetailsPath(id, prev.privacy), delete: true });
+      }
+    }
+    for (const [id, p] of this.pendingPhotos) {
+      if (!p.deleted) continue;
+      const prev = this.prevPhotos.get(id);
+      if (!prev) continue;
+      changes.push(
+        { path: mediaPath(prev, prev.privacy, 'full'), delete: true },
+        { path: mediaPath(prev, prev.privacy, 'thumb'), delete: true },
+        { path: photoDetailsPath(id, prev.privacy), delete: true },
+      );
+    }
+
+    // Index files: only the parts that actually changed are rewritten.
+    const { publicIndex, familyShards } = splitIndex(this.people, this.rels, this.shardCount, this.photos);
     const pubText = JSON.stringify(publicIndex);
     if (pubText !== this.lastPublicText) {
       changes.push({ path: PUBLIC_INDEX_PATH, content: JSON.stringify(publicIndex, null, 1) });
@@ -207,7 +422,8 @@ export class AdminStore {
     for (let i = 0; i < familyShards.length; i++) {
       if (shardTexts[i] === this.lastShardText[i]) continue;
       if (!this.key) {
-        if (familyShards[i].people.length || familyShards[i].rels.length) throw new Error('Unlock with the family password first.');
+        const sh = familyShards[i];
+        if (sh.people.length || sh.rels.length || sh.photos?.length || sh.portraits) throw new Error('Unlock with the family password first.');
         continue;
       }
       changes.push({ path: familyShardPath(i), content: await encryptJSON(this.key, familyShards[i]) });
@@ -218,19 +434,28 @@ export class AdminStore {
     if (this.configDirty) {
       changes.push({ path: CONFIG_PATH, content: JSON.stringify(this.config, null, 2) });
     }
-    return { changes, publicIndex, familyShards, pubText, shardTexts };
+    return { changes, publicIndex, familyShards, pubText, shardTexts, finalPhotos };
   }
 
-  /** Save everything as one commit. Returns { sha } or null when nothing changed. */
-  async save() {
-    const { changes, publicIndex, familyShards, pubText, shardTexts } = await this.buildChanges();
+  /**
+   * Save everything as one commit. Returns { sha } or null when nothing changed.
+   * onProgress({ done, total }) reports image uploads.
+   */
+  async save({ onProgress } = {}) {
+    const { changes, publicIndex, familyShards, pubText, shardTexts, finalPhotos } = await this.buildChanges();
     if (!changes.length) { this.clearPending(); return null; }
-    const result = await this.repo.commit(this.commitMessage(), changes);
+    const result = await this.repo.commit(this.commitMessage(), changes, { onProgress });
     // Success: what we saved is now the starting point.
     for (const [id, p] of this.pending) {
       if (p.deleted) this.personCache.delete(id);
       else this.personCache.set(id, p.person);
     }
+    for (const [id, p] of this.pendingPhotos) {
+      if (p.deleted) this.photoDetailsCache.delete(id);
+      else if (p.details) this.photoDetailsCache.set(id, p.details);
+    }
+    this.photos = finalPhotos;
+    this.prevPhotos = new Map([...finalPhotos].map(([id, s]) => [id, structuredClone(s)]));
     this.publicIndex = publicIndex;
     this.familyShards = familyShards;
     this.lastPublicText = pubText;
@@ -243,6 +468,7 @@ export class AdminStore {
 
   clearPending() {
     this.pending.clear();
+    this.pendingPhotos.clear();
     this.ops = [];
     this.settingsDirty = false;
     this.configDirty = false;
@@ -261,7 +487,7 @@ export class AdminStore {
    * quick: lock the same data key with the new password (no extra storage).
    * full:  new data key, every family file re-encrypted (use if the old password leaked).
    */
-  async changePassword(newPassword, { full = false } = {}) {
+  async changePassword(newPassword, { full = false, onProgress } = {}) {
     if (this.pendingCount) throw new Error('Save or discard your other changes first.');
     if (!this.key) throw new Error('Unlock with the family password first.');
     if (!full) {
@@ -269,17 +495,25 @@ export class AdminStore {
       this.config = { ...this.config, crypto };
       this.configDirty = true;
       this.ops.push({ text: 'Changed family password', public: true });
-      return this.save();
+      return this.save({ onProgress });
     }
 
     const newKey = await generateDataKey();
     const changes = [];
     for (const s of this.people.values()) {
       if (s.privacy !== 'family') continue;
-      const person = await this.getPerson(s.id);
+      const { photo, ...person } = await this.getPerson(s.id);
       changes.push({ path: personPath(s.id, 'family'), content: await encryptJSON(newKey, person) });
     }
-    const { familyShards } = splitIndex(this.people, this.rels, this.shardCount);
+    for (const s of this.prevPhotos.values()) {
+      if (s.privacy !== 'family') continue;
+      for (const which of ['full', 'thumb']) {
+        const bytes = await this.#readMedia(s, which);
+        if (bytes) changes.push({ path: mediaPath(s, 'family', which), bytes: await encryptBytes(newKey, bytes) });
+      }
+      changes.push({ path: photoDetailsPath(s.id, 'family'), content: await encryptJSON(newKey, await this.getPhotoDetails(s.id)) });
+    }
+    const { familyShards } = splitIndex(this.people, this.rels, this.shardCount, this.photos);
     for (let i = 0; i < familyShards.length; i++) {
       changes.push({ path: familyShardPath(i), content: await encryptJSON(newKey, familyShards[i]) });
     }
@@ -287,7 +521,7 @@ export class AdminStore {
     const crypto = await wrapKey(newKey, newPassword, this.iterations);
     const config = { ...this.config, crypto };
     changes.push({ path: CONFIG_PATH, content: JSON.stringify(config, null, 2) });
-    const result = await this.repo.commit('Change family password (full re-lock)', changes);
+    const result = await this.repo.commit('Change family password (full re-lock)', changes, { onProgress });
     this.config = config;
     this.key = newKey;
     this.head = result.sha;

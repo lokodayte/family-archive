@@ -16,6 +16,7 @@ You manage everything from the admin panel in your browser. You never need to ed
 3. [Adding a person](#adding-a-person)
 4. [Family links: parents, spouses, children](#family-links)
 5. [Dates that aren't exact](#dates)
+   - [Photos and scanned documents](#photos)
 6. [Public or family-only?](#privacy)
 7. [Saving and publishing](#saving)
 8. [Changing the family password](#password)
@@ -58,11 +59,11 @@ The admin panel needs a key from GitHub, called a *token*, that allows it to sav
 
 ### b) Replace the sample family
 
-The archive starts with a **made-up sample family** (the "Sampleyans") so you can try things out. The sample family password is in the setup message you received.
+The archive starts with a **made-up sample family** (the "Sampleyans") and four fake sample photos, so you can try things out. The sample family password is in the setup message you received.
 
 When you're ready to add real people:
 1. In the admin panel, go to **Settings → Family password**. Set your own family password and tick **Full re-lock**. This is cheap now because there's almost nothing stored yet.
-2. Delete the sample people: open each one and click **Delete person**, then **Save & publish**.
+2. Delete the sample people and sample photos: open each one, click **Delete**, then **Save & publish**.
 3. In **Settings**, set the **Archive title** and your **email for corrections**.
 
 <a id="adding-a-person"></a>
@@ -102,6 +103,43 @@ Type dates the way you'd say them. The admin panel shows ✓ with how it underst
 | `before 1930` / `after 1945` | not later / not earlier than |
 | `unknown` or `?` | we don't know |
 
+<a id="photos"></a>
+## 5b. Photos and scanned documents
+
+### Uploading
+1. Admin panel → **Photos**.
+2. Choose **Photos** or **Scanned documents** (scans are kept a little sharper so text stays readable).
+3. Drag files onto the dotted box, or click it to choose. You can pick many at once; **up to about 40 at a time** works best.
+4. Each image is automatically made smaller (about 2000 pixels and 300 KB) with a small thumbnail, and **hidden location (GPS) data is removed**. New photos start as **Family only**.
+5. A box then asks what the batch has in common (approximate date, place, privacy). Fill it in or skip it.
+6. Click **Save & publish**. The top bar shows "Uploading images: 3 of 20…". If GitHub asks us to slow down, it waits and continues by itself. Keep the page open until it finishes.
+
+> 📦 **Keep your full-size originals elsewhere.** The archive stores smaller copies. Put the originals on an external drive *and* in a cloud folder.
+
+iPhone photos in HEIC format may not open in every browser. If one is refused, export it as JPEG ("Most Compatible") first.
+
+### Describing a photo and tagging people
+Click a photo in **Photos** to open it:
+- **Tag people:** click on someone's face, start typing their name, and pick them. Unknown faces can become a new person or an "unknown person" placeholder.
+- **Use as profile photo:** in "People in this photo", click this next to a name. The profile picture is centred on that person's face. You can also choose a profile photo on the person's own page.
+- Add a **title**, **approximate date**, **place**, **description** and **the story behind it**.
+- **Rotate**, **Replace image** (for example with a better scan) or **Download** the stored copy.
+- Click **Keep these changes**, then **Save & publish**.
+
+### Who can see photos
+- New photos are **Family only** (encrypted).
+- A photo can be **Public** only if *everyone tagged in it* is public. If it shows a living or family-only person, it **stays family-only automatically**, even if you chose Public. The editor tells you why.
+- If you later make a person family-only, their public photos move to encrypted storage by themselves.
+
+### Storage
+- Replacing, rotating or deleting a saved photo does **not** free space: the old version stays in the history. The admin panel warns you before replacing.
+- About 300 KB per photo means roughly **2,500–3,000 photos** fit in the ~1 GB limit. The storage meter warns you at 70%.
+
+### On the website
+- **Gallery:** filter by person, place, decade, or photos versus documents. More photos load as you scroll.
+- Click a photo to see it large, with names on the faces, its story and the people in it. ← → keys move between photos.
+- Each profile shows the person's photo and all the photos they're tagged in.
+
 <a id="privacy"></a>
 ## 6. Public or family-only?
 
@@ -137,7 +175,7 @@ Admin panel → **Settings → Family password**:
 
 - **Every change is kept in the history.** GitHub stores every version of every file, so mistakes can be undone. (An undo button is coming in Phase 4.)
 - **Download a copy:** on the repository's GitHub page, click **Code → Download ZIP**. (A "Download full backup" button that includes readable family data is coming in Phase 4.)
-- **Keep full-resolution originals of photos and scans outside the site:** for example on an external drive *and* in a cloud folder. The archive will store smaller, web-friendly copies to stay within GitHub's ~1 GB limit.
+- **Keep full-resolution originals of photos and scans outside the site:** for example on an external drive *and* in a cloud folder. The archive stores smaller, web-friendly copies to stay within GitHub's ~1 GB limit.
 - Keep the family password and a note about where the originals are in a safe place, such as a sealed envelope with important papers.
 
 <a id="if-something-breaks"></a>
@@ -150,6 +188,8 @@ Admin panel → **Settings → Family password**:
 | "That family password is not right" | Check spelling and capital letters. If the password was changed, ask for the new one. |
 | The site looks old after saving | Wait a minute, then refresh the page. |
 | Something is wrong with the data | Every earlier version is in the history (**Commits** on the repository page). Nothing is ever truly lost. Ask for help restoring it. |
+| A photo is refused when uploading | It's probably an iPhone HEIC or an unusual format. Export it as JPEG and try again. |
+| Saving stops at "GitHub asked us to slow down" | That's normal for big batches. Keep the page open; it carries on by itself. |
 | Storage warning (70%) | See [backups](#backups). Old versions of replaced photos count too, so avoid uploading the same big file repeatedly. |
 
 <a id="practice"></a>
@@ -167,7 +207,6 @@ Practice mode works like the real admin panel but never sends anything to GitHub
 <a id="coming-next"></a>
 ## 12. What's coming next
 
-- **Phase 2:** photos and scanned documents: drag-and-drop upload, automatic resizing, tagging people by clicking on faces, and a gallery.
 - **Phase 3:** places with historical names, migrations, a map with family journeys, and a timeline slider.
 - **Phase 4:** a recent-changes page with undo, a full backup ZIP, GEDCOM import and export, a fuller tree, "How are we related?", and more mobile polish.
 

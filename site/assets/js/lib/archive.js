@@ -1,9 +1,10 @@
 // Loads the published archive for visitors, and unlocks family data with the password.
-import { unlockKeyring, decryptJSON, exportKey, importKey } from './crypto.js';
+import { unlockKeyring, decryptJSON, decryptBytes, exportKey, importKey } from './crypto.js';
 import {
   mergeIndexes, personPath, familyShardPath, PUBLIC_INDEX_PATH, CONFIG_PATH, SETTINGS_PATH,
-  DEFAULT_SHARDS,
+  DEFAULT_SHARDS, mediaPath, photoDetailsPath,
 } from './model.js';
+import { BlobCache } from './media.js';
 import { buildGraph } from './relations.js';
 import { safeStorage, scopedKey } from './dom.js';
 
@@ -16,6 +17,8 @@ export class Archive {
     this.familyShards = [];
     this.familySettings = {};
     this.personCache = new Map();
+    this.photoDetailsCache = new Map();
+    this.blobs = new BlobCache();
   }
 
   async fetchText(path) {
@@ -66,6 +69,7 @@ export class Archive {
     this.forgetKey();
     safeStorage.set(remember ? 'localStorage' : 'sessionStorage', KEY_NAME(), b64);
     this.personCache.clear();
+    this.photoDetailsCache.clear();
     this.rebuild();
   }
 
@@ -74,6 +78,7 @@ export class Archive {
     this.familyShards = [];
     this.familySettings = {};
     this.personCache.clear();
+    this.photoDetailsCache.clear();
     this.forgetKey();
     this.rebuild();
   }
@@ -84,9 +89,10 @@ export class Archive {
   }
 
   rebuild() {
-    const { people, rels } = mergeIndexes(this.publicIndex, this.familyShards);
+    const { people, rels, photos } = mergeIndexes(this.publicIndex, this.familyShards);
     this.people = people;
     this.rels = rels;
+    this.photos = photos;
     this.graph = buildGraph(rels);
   }
 
@@ -100,8 +106,33 @@ export class Archive {
       const t = await this.fetchText(personPath(id, 'family'));
       person = t ? await decryptJSON(this.key, t) : null;
     }
-    person = person || { ...s };
+    person = { ...(person || s) };
+    // The index decides the profile photo (it knows which photos this visitor may see).
+    if (s.photo) person.photo = s.photo; else delete person.photo;
     this.personCache.set(id, person);
     return person;
+  }
+
+  /** URL to show a photo: 'full' or 'thumb'. Family photos are decrypted in the browser. */
+  async imageURL(photo, which = 'thumb') {
+    const path = mediaPath(photo, photo.privacy, which);
+    if (photo.privacy === 'public') return this.base + path;
+    if (!this.key) return null;
+    return this.blobs.get(path, async () => {
+      const res = await fetch(this.base + path);
+      if (!res.ok) return null;
+      return decryptBytes(this.key, new Uint8Array(await res.arrayBuffer()));
+    });
+  }
+
+  async getPhotoDetails(id) {
+    if (this.photoDetailsCache.has(id)) return this.photoDetailsCache.get(id);
+    const s = this.photos.get(id);
+    if (!s) return {};
+    let details = {};
+    const text = await this.fetchText(photoDetailsPath(id, s.privacy));
+    if (text) details = s.privacy === 'public' ? JSON.parse(text) : await decryptJSON(this.key, text);
+    this.photoDetailsCache.set(id, details);
+    return details;
   }
 }

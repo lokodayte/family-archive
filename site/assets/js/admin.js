@@ -7,8 +7,12 @@ import { AdminStore } from './lib/adminStore.js';
 import { exportKey, importKey, WrongPasswordError } from './lib/crypto.js';
 import {
   emptyPerson, newId, displayName, searchPeople, summarize, initials,
-  SCRIPTS, SCRIPT_LABELS, effectivePrivacy, relPeople,
+  SCRIPTS, SCRIPT_LABELS, effectivePrivacy, relPeople, mediaPath, effectivePhotoPrivacy,
+  photoTitle, PHOTO_KINDS, normalizeText,
 } from './lib/model.js';
+import { processImage, rotateImage, formatBytes, ACCEPTED } from './lib/images.js';
+import { lazyImage, BlobCache, tagLayer, clickPosition } from './lib/media.js';
+import { sortPhotos } from './lib/gallery.js';
 import { parseDate, formatDate, DATE_HELP } from './lib/dates.js';
 import { PARENT_KINDS } from './lib/relations.js';
 import { lifespan, EVENT_TYPES } from './lib/timeline.js';
@@ -112,7 +116,12 @@ function tokenHelp() {
 
 async function openStore(repo) {
   clear(view, h('p', { class: 'loading' }, t('Loading the archive…')));
-  store = new AdminStore(repo);
+  store = new AdminStore(repo, {
+    siteLoader: async (path) => {
+      const res = await fetch(`../${path}`);
+      return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
+    },
+  });
   try {
     await store.load();
   } catch (err) {
@@ -213,6 +222,8 @@ function renderSavebar() {
   const status = {
     idle: n ? null : h('span', { class: 'status status-ok' }, '✓ ', t('Everything is saved')),
     saving: h('span', { class: 'status status-busy' }, h('span', { class: 'spinner' }), t('Saving…')),
+    uploading: h('span', { class: 'status status-busy' }, h('span', { class: 'spinner' }), t('Uploading images: {done} of {total}…', publishState)),
+    waiting: h('span', { class: 'status status-busy' }, h('span', { class: 'spinner' }), t('GitHub asked us to slow down. Waiting {sec} seconds, then continuing — keep this page open.', publishState)),
     publishing: h('span', { class: 'status status-busy' }, h('span', { class: 'spinner' }), t('Saved. Live in about a minute…')),
     live: h('span', { class: 'status status-ok' }, '✓ ', t('Live on the site'), publishState.at ? ` (${publishState.at})` : ''),
     saved: h('span', { class: 'status status-ok' }, '✓ ', t('Saved. Live in about a minute.')),
@@ -226,16 +237,22 @@ function renderSavebar() {
       h('div', { class: 'pending-list' },
         h('ul', {}, store.ops.map((o) => h('li', {}, o.text))),
         h('button', { class: 'btn btn-quiet btn-small', onclick: discardAll }, t('Discard these changes')))) : null,
-    n ? h('button', { class: 'btn btn-primary', onclick: saveAll, disabled: publishState.state === 'saving' }, t('Save & publish')) : null,
+    n ? h('button', { class: 'btn btn-primary', onclick: saveAll, disabled: ['saving', 'uploading', 'waiting'].includes(publishState.state) }, t('Save & publish')) : null,
     status);
 }
 
 async function saveAll() {
-  if (editorDirty && !confirm(t('You are in the middle of editing a person. Those edits are not kept yet. Save the other changes anyway?'))) return;
+  if (editorDirty && !confirm(t('You are in the middle of editing. Those edits are not kept yet. Save the other changes anyway?'))) return;
+  const upload = store.pendingUploadBytes;
+  if (upload && storageKB != null && (storageKB * 1024 + upload) / (STORAGE_LIMIT_KB * 1024) >= 0.7
+    && !confirm(t('These uploads ({size}) will bring storage above 70% of the ~1 GB limit. Continue?', { size: formatBytes(upload) }))) return;
   publishState = { state: 'saving' };
   renderSavebar();
+  store.repo.onWait = (sec) => { publishState = { state: 'waiting', sec }; renderSavebar(); };
   try {
-    const result = await store.save();
+    const result = await store.save({
+      onProgress: ({ done, total }) => { publishState = { state: 'uploading', done, total }; renderSavebar(); },
+    });
     if (!result) { publishState = { state: 'idle' }; renderSavebar(); return; }
     publishState = { state: 'publishing', sha: result.sha };
     renderSavebar();
@@ -321,15 +338,18 @@ function renderBanners() {
 
 async function route() {
   const [, page, id] = (location.hash || '#/people').split('/');
-  if (editorDirty && !(page === 'person' && id === currentEditId)) {
-    if (!confirm(t('Leave this person without keeping your edits?'))) {
-      history.replaceState(null, '', `#/person/${currentEditId}`);
+  if (editorDirty && `${page}/${id}` !== currentEditRoute) {
+    if (!confirm(t('Leave without keeping your edits?'))) {
+      history.replaceState(null, '', `#/${currentEditRoute}`);
       return;
     }
     editorDirty = false;
   }
-  document.querySelectorAll('#admin-nav a[data-page]').forEach((a) => a.classList.toggle('active', a.dataset.page === (page === 'person' || page === 'new' ? 'people' : page || 'people')));
+  const section = { person: 'people', new: 'people', photo: 'photos' }[page] || page || 'people';
+  document.querySelectorAll('#admin-nav a[data-page]').forEach((a) => a.classList.toggle('active', a.dataset.page === section));
   if (page === 'person' && id) await editorPage(decodeURIComponent(id));
+  else if (page === 'photos') photosPage();
+  else if (page === 'photo' && id) await photoEditorPage(decodeURIComponent(id));
   else if (page === 'new') await editorPage(null);
   else if (page === 'settings') settingsPage();
   else if (page === 'help') helpPage();
@@ -396,7 +416,7 @@ function peoplePage() {
 // Person editor
 // =====================================================================
 
-let currentEditId = null;
+let currentEditRoute = null;
 
 /** Search-as-you-type box to pick a person (or create one). */
 function personPicker({ label, excludeIds = [], extraPeople = () => [], onPick, allowCreate = true }) {
@@ -454,35 +474,8 @@ function newPersonFrom({ name, placeholder }) {
   return p;
 }
 
-async function editorPage(id) {
-  clear(view, h('p', { class: 'loading' }, t('Loading…')));
-  const isNew = !id || !store.people.has(id);
-  if (id && isNew) {
-    clear(view, h('h1', {}, t('Person not found')), h('a', { href: '#/people' }, t('Back to people')));
-    return;
-  }
-  let person;
-  try {
-    person = isNew ? emptyPerson() : await store.getPerson(id);
-  } catch (err) {
-    clear(view, h('h1', {}, t('Could not open this person')), h('p', {}, err.message));
-    return;
-  }
-  for (const k of ['names', 'birth', 'death']) person[k] = person[k] || {};
-  for (const k of ['nicknames', 'languages', 'stories', 'events', 'sources']) person[k] = person[k] || [];
-  for (const sc of SCRIPTS) person.names[sc] = person.names[sc] || {};
-
-  currentEditId = person.id;
-  if (isNew) history.replaceState(null, '', `#/person/${person.id}`);
-  const draftRels = store.relsOf(person.id).map((r) => structuredClone(r));
-  const newPeople = [];
-  editorDirty = isNew;
-  const touch = () => { editorDirty = true; };
-
-  const lookup = (pid) => store.people.get(pid) || summarize(newPeople.find((p) => p.id === pid) || { id: pid });
-  const nameOf = (pid) => displayName(lookup(pid));
-
-  // ----- field helpers -----
+/** Form fields that call touch() when changed. */
+function fieldKit(touch) {
   const text = (label, get, set, opts = {}) => {
     const attrs = {
       value: get() || '', placeholder: opts.placeholder || '', lang: opts.lang,
@@ -516,6 +509,39 @@ async function editorPage(id) {
   };
   const listField = (label, get, set, hint) => text(label, () => (get() || []).join(', '),
     (v) => set(v.split(',').map((x) => x.trim()).filter(Boolean)), { hint });
+
+  return { text, select, dateField, listField };
+}
+
+async function editorPage(id) {
+  clear(view, h('p', { class: 'loading' }, t('Loading…')));
+  const isNew = !id || !store.people.has(id);
+  if (id && isNew) {
+    clear(view, h('h1', {}, t('Person not found')), h('a', { href: '#/people' }, t('Back to people')));
+    return;
+  }
+  let person;
+  try {
+    person = isNew ? emptyPerson() : await store.getPerson(id);
+  } catch (err) {
+    clear(view, h('h1', {}, t('Could not open this person')), h('p', {}, err.message));
+    return;
+  }
+  for (const k of ['names', 'birth', 'death']) person[k] = person[k] || {};
+  for (const k of ['nicknames', 'languages', 'stories', 'events', 'sources']) person[k] = person[k] || [];
+  for (const sc of SCRIPTS) person.names[sc] = person.names[sc] || {};
+
+  currentEditRoute = `person/${person.id}`;
+  if (isNew) history.replaceState(null, '', `#/person/${person.id}`);
+  const draftRels = store.relsOf(person.id).map((r) => structuredClone(r));
+  const newPeople = [];
+  editorDirty = isNew;
+  const touch = () => { editorDirty = true; };
+
+  const lookup = (pid) => store.people.get(pid) || summarize(newPeople.find((p) => p.id === pid) || { id: pid });
+  const nameOf = (pid) => displayName(lookup(pid));
+
+  const { text, select, dateField, listField } = fieldKit(touch);
 
   /** A list of repeatable blocks (stories, events, sources). */
   const repeatable = (title, arr, makeItem, renderItem, addLabel) => {
@@ -689,6 +715,7 @@ async function editorPage(id) {
         dateField(t('Date of birth'), () => person.birth.date, (v) => { person.birth.date = v; }),
         text(t('Place of birth'), () => person.birth.place, (v) => { person.birth.place = v; }, { placeholder: t('Town, country') })),
       deathBox),
+    portraitSection(person, touch),
     h('section', { class: 'panel' }, h('h2', {}, t('Family links')), relBox, relProblems),
     h('section', { class: 'panel' }, h('h2', {}, t('Life')),
       h('div', { class: 'grid-2' },
@@ -717,6 +744,400 @@ async function editorPage(id) {
         h('button', { type: 'button', class: 'btn btn-quiet', onclick: cancel }, t('Cancel')),
         !isNew && h('button', { type: 'button', class: 'btn btn-danger', onclick: remove }, t('Delete person'))),
       h('p', { class: 'muted small' }, t('"Keep" adds this to your list of changes. Nothing is published until you click "Save & publish" at the top.'))));
+}
+
+// =====================================================================
+// Photos and documents
+// =====================================================================
+
+const blobCache = new BlobCache(300);
+const pendingUrls = new WeakMap();
+
+/** URL for a photo in the admin panel (new uploads come from memory). */
+function adminImageURL(id, which = 'thumb') {
+  const pend = store.pendingPhotos.get(id);
+  const bytes = pend?.image ? (which === 'thumb' ? pend.thumb : pend.image) : null;
+  if (bytes) {
+    if (!pendingUrls.has(bytes)) pendingUrls.set(bytes, URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' })));
+    return Promise.resolve(pendingUrls.get(bytes));
+  }
+  const prev = store.prevPhotos.get(id);
+  if (!prev) return Promise.resolve(null);
+  return blobCache.get(mediaPath(prev, prev.privacy, which), () => store.getImageBytes(id, which));
+}
+
+const personName = (pid) => (store.people.has(pid) ? displayName(store.people.get(pid)) : t('(removed person)'));
+
+function photoCard(ph) {
+  const pending = store.pendingPhotos.has(ph.id);
+  const tags = ph.tags || [];
+  return h('a', { class: 'photo-card', href: `#/photo/${ph.id}` },
+    h('span', { class: 'photo-thumb' }, lazyImage(() => adminImageURL(ph.id, 'thumb'), { alt: photoTitle(ph) })),
+    h('span', { class: 'photo-card-text' },
+      h('span', { class: 'photo-card-title' }, photoTitle(ph)),
+      h('span', { class: 'muted small' }, [formatDate(ph.date), ph.place].filter(Boolean).join(' · ') || ' '),
+      h('span', { class: 'badges' },
+        h('span', { class: `badge ${ph.privacy === 'public' ? 'badge-public' : 'badge-family'}` }, ph.privacy === 'public' ? t('Public') : t('Family')),
+        ph.kind === 'document' && h('span', { class: 'badge' }, t('Document')),
+        tags.length ? h('span', { class: 'badge' }, t(tags.length === 1 ? '1 person' : '{n} people', { n: tags.length })) : h('span', { class: 'badge badge-placeholder' }, t('No one tagged')),
+        pending && h('span', { class: 'badge badge-unsaved' }, t('Unsaved')))));
+}
+
+let photoFilter = 'all';
+let photoQuery = '';
+let lastBatch = [];
+let uploadKind = 'photo';
+let photoLimit = 120;
+
+function photosPage() {
+  const fileInput = h('input', {
+    type: 'file', multiple: true, accept: ACCEPTED, hidden: true,
+    onchange: (e) => { handleFiles([...e.target.files]); e.target.value = ''; },
+  });
+  const progress = h('div', { class: 'upload-progress', role: 'status', 'aria-live': 'polite' });
+  const drop = h('div', {
+    class: 'dropzone', tabindex: '0', role: 'button', 'aria-label': t('Choose photos to upload'),
+    onclick: () => fileInput.click(),
+    onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } },
+    ondragover: (e) => { e.preventDefault(); drop.classList.add('over'); },
+    ondragleave: () => drop.classList.remove('over'),
+    ondrop: (e) => { e.preventDefault(); drop.classList.remove('over'); handleFiles([...e.dataTransfer.files]); },
+  },
+  h('span', { class: 'dropzone-icon', 'aria-hidden': 'true' }, '⇪'),
+  h('strong', {}, t('Drag photos or scans here, or click to choose')),
+  h('span', { class: 'muted small' }, t('You can pick many at once. Each image is made smaller (about 300 KB) and hidden location data is removed before upload.')),
+  h('span', { class: 'muted small' }, t('Keep your full-size originals somewhere safe too — an external drive and a cloud folder.')));
+
+  async function handleFiles(files) {
+    const images = files.filter((f) => f.type.startsWith('image/') || /\.(heic|heif)$/i.test(f.name));
+    const skipped = files.length - images.length;
+    if (!images.length) { toast(t('Those files are not images. PDFs and other files are not supported yet.'), 'error'); return; }
+    if (images.length > 40 && !confirm(t('That is {n} images. Up to about 40 at a time works best; bigger batches still work, but saving may pause for a minute now and then while GitHub catches up. Continue?', { n: images.length }))) return;
+    const batch = [];
+    const errors = [];
+    for (let i = 0; i < images.length; i++) {
+      clear(progress, h('span', { class: 'spinner' }), ' ', t('Preparing {i} of {n}: {name}', { i: i + 1, n: images.length, name: images[i].name }));
+      try {
+        const result = await processImage(images[i], { kind: uploadKind });
+        batch.push(store.addPhoto({ kind: uploadKind, choice: 'family', originalName: images[i].name }, result));
+      } catch (err) {
+        errors.push(err.message);
+      }
+    }
+    lastBatch = batch;
+    changed();
+    photosPage();
+    if (batch.length) toast(t('{n} added. Fill in the details below, then click “Save & publish”.', { n: batch.length }), 'ok');
+    if (errors.length) alert(errors.join('\n\n'));
+    if (skipped) toast(t('{n} file(s) were skipped because they are not images.', { n: skipped }));
+  }
+
+  // ----- details shared by the batch just uploaded -----
+  const batchIds = lastBatch.filter((id) => store.photos.has(id) && store.pendingPhotos.has(id));
+  let batchPanel = null;
+  if (batchIds.length) {
+    const shared = { date: undefined, place: '', choice: 'family' };
+    const fields = fieldKit(() => {});
+    batchPanel = h('section', { class: 'panel batch-panel' },
+      h('h2', {}, t('You just added {n}. What do they have in common?', { n: batchIds.length })),
+      h('p', { class: 'muted small' }, t('Leave a box empty to keep each photo as it is. You can change each one separately afterwards.')),
+      h('div', { class: 'grid-2' },
+        fields.dateField(t('Approximate date'), () => shared.date, (v) => { shared.date = v; }),
+        fields.text(t('Place'), () => shared.place, (v) => { shared.place = v; }, { placeholder: t('Town, country') })),
+      privacyChoice('batch-privacy', () => shared.choice, (v) => { shared.choice = v; }),
+      h('div', { class: 'actions' },
+        h('button', {
+          class: 'btn btn-primary', onclick: async () => {
+            if (document.querySelector('.batch-panel .date-preview.bad')) { toast(t('Please fix the date first.'), 'error'); return; }
+            for (const id of batchIds) {
+              const details = await store.getPhotoDetails(id);
+              const cur = { ...store.photos.get(id), ...details, choice: shared.choice };
+              if (shared.date) cur.date = shared.date;
+              if (shared.place.trim()) cur.place = shared.place.trim();
+              store.updatePhoto(cur);
+            }
+            lastBatch = [];
+            changed();
+            toast(t('Applied. Now click each photo to give it a title and tag the people in it.'), 'ok');
+            photosPage();
+          },
+        }, t('Apply to all {n}', { n: batchIds.length })),
+        h('button', { class: 'btn btn-quiet', onclick: () => { lastBatch = []; photosPage(); } }, t('Skip'))));
+  }
+
+  // ----- the grid -----
+  const filters = {
+    all: [t('All'), () => true],
+    unsaved: [t('Unsaved'), (p) => store.pendingPhotos.has(p.id)],
+    untagged: [t('No one tagged'), (p) => !p.tags?.length],
+    family: [t('Family only'), (p) => p.privacy === 'family'],
+    public: [t('Public'), (p) => p.privacy === 'public'],
+    document: [t('Documents'), (p) => p.kind === 'document'],
+  };
+  const grid = h('div', { class: 'photo-grid' });
+  const more = h('div', {});
+  const drawGrid = () => {
+    const q = normalizeText(photoQuery).trim();
+    const all = [...store.photos.values()];
+    let list = all.filter(filters[photoFilter][1]).filter((p) => !q || normalizeText(
+      [p.title, p.place, formatDate(p.date), ...(p.tags || []).map((tg) => personName(tg.person))].join(' '),
+    ).includes(q));
+    // Unsaved first, then oldest to newest.
+    const unsaved = list.filter((p) => store.pendingPhotos.has(p.id));
+    list = [...unsaved, ...sortPhotos(list.filter((p) => !store.pendingPhotos.has(p.id)))];
+    clear(grid, list.slice(0, photoLimit).map(photoCard));
+    clear(more, list.length > photoLimit
+      ? h('button', { class: 'btn btn-quiet', onclick: () => { photoLimit += 120; drawGrid(); } }, t('Show more ({n} left)', { n: list.length - photoLimit }))
+      : null);
+    if (!list.length) clear(grid, h('p', { class: 'muted' }, all.length ? t('No photos match.') : t('No photos yet. Add some above.')));
+  };
+  drawGrid();
+
+  clear(view,
+    h('div', { class: 'admin-title' }, h('h1', {}, t('Photos and documents'))),
+    h('fieldset', { class: 'radio-group kind-choice' },
+      h('legend', {}, t('What are you adding?')),
+      Object.entries({ photo: t('Photos'), document: t('Scanned documents (letters, certificates…)') }).map(([k, label]) =>
+        h('label', { class: 'check' }, h('input', { type: 'radio', name: 'upload-kind', checked: uploadKind === k, onchange: () => { uploadKind = k; } }), label))),
+    drop, fileInput, progress,
+    batchPanel,
+    h('input', {
+      type: 'search', class: 'search-input', placeholder: t('Find by title, place, year or person…'), value: photoQuery,
+      oninput: debounce((e) => { photoQuery = e.target.value; photoLimit = 120; drawGrid(); }, 100),
+    }),
+    h('div', { class: 'filter-chips' }, Object.entries(filters).map(([k, [label]]) => h('button', {
+      class: `chip-btn${photoFilter === k ? ' on' : ''}`, 'aria-pressed': String(photoFilter === k),
+      onclick: () => { photoFilter = k; photoLimit = 120; photosPage(); },
+    }, label))),
+    h('p', { class: 'muted small' }, t('{n} photos and documents', { n: store.photos.size })),
+    grid, more);
+}
+
+/** Public / family radio buttons for a photo. */
+function privacyChoice(name, get, set) {
+  return h('fieldset', { class: 'radio-group' },
+    h('legend', {}, t('Who can see it?')),
+    h('label', { class: 'check' }, h('input', { type: 'radio', name, checked: get() !== 'public', onchange: () => set('family') }),
+      h('span', {}, h('strong', {}, t('Family only')), ' — ', t('encrypted; visible only with the family password'))),
+    h('label', { class: 'check' }, h('input', {
+      type: 'radio', name, checked: get() === 'public',
+      onchange: (e) => {
+        if (!confirm(t('Make this PUBLIC?\n\nAnyone who finds the site can see public photos, and they stay in the history permanently. Photos showing living or family-only people stay family-only automatically.'))) {
+          e.target.checked = false;
+          e.target.closest('fieldset').querySelector('input').checked = true;
+          return;
+        }
+        set('public');
+      },
+    }), h('span', {}, h('strong', {}, t('Public')), ' — ', t('only if everyone tagged in it is public'))));
+}
+
+async function photoEditorPage(id) {
+  const original = store.photos.get(id);
+  if (!original) { clear(view, h('h1', {}, t('Photo not found')), h('a', { href: '#/photos' }, t('Back to photos'))); return; }
+  clear(view, h('p', { class: 'loading' }, t('Loading…')));
+  const details = await store.getPhotoDetails(id);
+  const draft = { ...structuredClone(original), ...structuredClone(details), tags: structuredClone(original.tags || []) };
+  const startText = JSON.stringify(draft);
+  let newImage = null; // { image, thumb, w, h } after rotate/replace
+  const portraits = new Set(); // people who should get this as profile photo
+  currentEditRoute = `photo/${id}`;
+  editorDirty = false;
+  const touch = () => { editorDirty = true; };
+  const { text, select, dateField } = fieldKit(touch);
+  const isSaved = store.prevPhotos.has(id);
+
+  // ----- image with name tags -----
+  const stage = h('div', { class: 'photo-stage' });
+  const tagList = h('div', { class: 'tag-list' });
+  const privacyNote = h('p', { class: 'muted small' });
+  let imgURL = null;
+
+  const imageURL = async () => {
+    if (newImage) {
+      if (!pendingUrls.has(newImage.image)) pendingUrls.set(newImage.image, URL.createObjectURL(new Blob([newImage.image], { type: 'image/jpeg' })));
+      return pendingUrls.get(newImage.image);
+    }
+    return adminImageURL(id, 'full');
+  };
+
+  const drawStage = async (taggerAt) => {
+    imgURL = await imageURL();
+    const img = h('img', { class: 'photo-full', src: imgURL, alt: photoTitle(draft), draggable: 'false' });
+    const frame = h('div', { class: 'photo-frame tagging' }, img,
+      tagLayer(draft.tags, { nameOf: personName, onClickTag: (tag) => { tagList.querySelector(`[data-person="${tag.person}"]`)?.focus(); } }));
+    img.addEventListener('click', (e) => drawStage(clickPosition(e, img)));
+    if (taggerAt) {
+      frame.append(h('span', { class: 'tag tag-new', style: `left:${taggerAt.x * 100}%;top:${taggerAt.y * 100}%` }, h('span', { class: 'tag-dot' })));
+      const picker = personPicker({
+        label: t('Who is this?'),
+        excludeIds: draft.tags.map((tg) => tg.person),
+        onPick: (pid, create) => {
+          if (!pid) {
+            const np = newPersonFrom(create);
+            store.applyPersonEdit(np, []);
+            changed();
+            pid = np.id;
+          }
+          draft.tags.push({ person: pid, x: taggerAt.x, y: taggerAt.y });
+          touch();
+          drawStage();
+          drawTags();
+        },
+      });
+      const box = h('div', { class: 'tagger', style: `left:${Math.min(Math.max(taggerAt.x * 100, 15), 85)}%;top:${taggerAt.y * 100}%` },
+        h('strong', {}, t('Who is this?')), picker,
+        h('button', { type: 'button', class: 'btn btn-quiet btn-small', onclick: () => drawStage() }, t('Cancel')));
+      frame.append(box);
+      setTimeout(() => picker.querySelector('input').focus(), 0);
+    }
+    clear(stage, frame,
+      h('p', { class: 'muted small' }, draft.tags.length ? t('Click on another face to tag more people.') : t('Click on a person’s face in the picture to tag them.')));
+  };
+
+  const drawTags = () => {
+    const eff = effectivePhotoPrivacy(draft, store.people);
+    const blockers = draft.tags.filter((tg) => store.people.get(tg.person)?.privacy !== 'public').map((tg) => personName(tg.person));
+    privacyNote.textContent = draft.choice === 'public' && eff !== 'public'
+      ? t('This photo will stay family-only because it shows: {names}.', { names: blockers.join(', ') }) : '';
+    clear(tagList, draft.tags.length ? draft.tags.map((tg) => {
+      const isPortrait = store.people.get(tg.person)?.photo === id || portraits.has(tg.person);
+      return h('div', { class: 'rel-row', tabindex: '-1', 'data-person': tg.person },
+        h('div', { class: 'rel-main' },
+          h('span', { class: 'monogram small', 'aria-hidden': 'true' }, initials(store.people.get(tg.person) || {})),
+          h('a', { href: `#/person/${tg.person}` }, personName(tg.person))),
+        isPortrait
+          ? h('span', { class: 'badge badge-public' }, '✓ ', t('Profile photo'))
+          : h('button', { type: 'button', class: 'btn btn-quiet btn-small', onclick: () => { portraits.add(tg.person); touch(); drawTags(); } }, t('Use as profile photo')),
+        h('button', {
+          type: 'button', class: 'btn btn-quiet btn-small',
+          onclick: () => { draft.tags = draft.tags.filter((x) => x !== tg); portraits.delete(tg.person); touch(); drawStage(); drawTags(); },
+        }, t('Remove tag')));
+    }) : h('p', { class: 'muted' }, t('No one tagged yet.')));
+  };
+
+  // ----- image changes -----
+  const confirmReplace = () => {
+    if (!isSaved || newImage) return true;
+    const size = store.replacedBytes(id);
+    return confirm(t('The current image ({size}) stays in the history and keeps using storage. Replace it?', { size: formatBytes(size) }));
+  };
+  const rotate = async (deg) => {
+    if (!confirmReplace()) return;
+    const bytes = newImage?.image || await store.getImageBytes(id, 'full');
+    newImage = await rotateImage(bytes, deg, draft.kind);
+    // Keep name tags on the same faces.
+    draft.tags = draft.tags.map((tg) => (deg === 90 ? { ...tg, x: +(1 - tg.y).toFixed(3), y: tg.x } : { ...tg, x: tg.y, y: +(1 - tg.x).toFixed(3) }));
+    touch();
+    drawStage();
+  };
+  const replaceInput = h('input', {
+    type: 'file', accept: ACCEPTED, hidden: true,
+    onchange: async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file || !confirmReplace()) return;
+      try {
+        newImage = await processImage(file, { kind: draft.kind });
+        touch();
+        drawStage();
+        toast(t('New image ready. Check the name tags are still on the right faces.'));
+      } catch (err) { alert(err.message); }
+    },
+  });
+
+  const formMsg = h('p', { class: 'form-message', role: 'alert' });
+  const keep = () => {
+    if (view.querySelector('.date-preview.bad')) { formMsg.textContent = t('The date could not be read. Please fix it.'); return; }
+    if (newImage) store.replacePhotoImage(id, newImage);
+    if (JSON.stringify(draft) !== startText || newImage) store.updatePhoto(draft);
+    for (const pid of portraits) store.setPortrait(pid, id);
+    editorDirty = false;
+    changed();
+    toast(t('Kept. Click "Save & publish" when you are ready.'), 'ok');
+    location.hash = '#/photos';
+  };
+  const cancel = () => {
+    if (editorDirty && !confirm(t('Throw away the edits to this photo?'))) return;
+    editorDirty = false;
+    location.hash = '#/photos';
+  };
+  const remove = () => {
+    const msg = isSaved
+      ? t('Delete this photo? It disappears from the site when you Save & publish. (The old file stays in the history, so deleting does not free up storage.)')
+      : t('Remove this new photo? It has not been saved yet.');
+    if (!confirm(msg)) return;
+    store.deletePhoto(id);
+    editorDirty = false;
+    changed();
+    location.hash = '#/photos';
+  };
+  const download = async () => {
+    const a = h('a', { href: await imageURL(), download: `${(draft.title || draft.originalName || id).replace(/[^\w\- ]+/g, '').trim() || id}.jpg` });
+    document.body.append(a); a.click(); a.remove();
+  };
+
+  clear(view,
+    h('nav', { class: 'crumbs' }, h('a', { href: '#/photos' }, t('Photos')), ' / ', photoTitle(draft)),
+    h('div', { class: 'admin-title' }, h('h1', {}, photoTitle(draft)),
+      isSaved && h('a', { class: 'btn btn-quiet btn-small', href: `../#/photo/${id}`, target: '_blank', rel: 'noopener' }, t('View on site ↗'))),
+    h('div', { class: 'photo-editor' },
+      h('div', {},
+        stage,
+        h('div', { class: 'actions' },
+          h('button', { type: 'button', class: 'btn btn-quiet btn-small', onclick: () => rotate(-90) }, '↺ ', t('Rotate left')),
+          h('button', { type: 'button', class: 'btn btn-quiet btn-small', onclick: () => rotate(90) }, '↻ ', t('Rotate right')),
+          h('button', { type: 'button', class: 'btn btn-quiet btn-small', onclick: () => replaceInput.click() }, t('Replace image…')),
+          h('button', { type: 'button', class: 'btn btn-quiet btn-small', onclick: download }, t('Download')),
+          replaceInput),
+        h('p', { class: 'muted small' }, [
+          draft.w && `${draft.w} × ${draft.h} px`, draft.bytes && formatBytes(draft.bytes), draft.originalName && t('from “{name}”', { name: draft.originalName }),
+        ].filter(Boolean).join(' · '))),
+      h('div', {},
+        h('section', { class: 'panel' }, h('h2', {}, t('People in this photo')), tagList),
+        h('section', { class: 'panel' }, h('h2', {}, t('About this photo')),
+          text(t('Title'), () => draft.title, (v) => { draft.title = v; }, { placeholder: t('e.g. Grandmother’s 50th birthday') }),
+          select(t('Kind'), Object.fromEntries(Object.entries(PHOTO_KINDS).map(([k, v]) => [k, t(v)])), () => draft.kind || 'photo', (v) => { draft.kind = v; }),
+          h('div', { class: 'grid-2' },
+            dateField(t('Approximate date'), () => draft.date, (v) => { draft.date = v; }),
+            text(t('Place'), () => draft.place, (v) => { draft.place = v; }, { placeholder: t('Town, country') })),
+          text(t('Description'), () => draft.description, (v) => { draft.description = v; }, { multiline: true, rows: 3, placeholder: t('Who, what, where — what you see in the picture') }),
+          text(t('The story behind it'), () => draft.story, (v) => { draft.story = v; }, { multiline: true, rows: 6 })),
+        h('section', { class: 'panel' }, h('h2', {}, t('Privacy')),
+          privacyChoice('photo-privacy', () => draft.choice, (v) => { draft.choice = v; touch(); drawTags(); }),
+          privacyNote))),
+    h('div', { class: 'editor-actions' },
+      formMsg,
+      h('div', { class: 'actions' },
+        h('button', { type: 'button', class: 'btn btn-primary', onclick: keep }, t('Keep these changes')),
+        h('button', { type: 'button', class: 'btn btn-quiet', onclick: cancel }, t('Cancel')),
+        h('button', { type: 'button', class: 'btn btn-danger', onclick: remove }, isSaved ? t('Delete photo') : t('Remove'))),
+      h('p', { class: 'muted small' }, t('"Keep" adds this to your list of changes. Nothing is published until you click "Save & publish" at the top.'))));
+  drawStage();
+  drawTags();
+}
+
+/** On a person's page in the admin: choose their profile photo. */
+function portraitSection(person, touch) {
+  const photos = sortPhotos(store.photosOf(person.id));
+  const box = h('div', { class: 'portrait-choices' });
+  const draw = () => clear(box,
+    h('label', { class: `portrait-choice none${!person.photo ? ' on' : ''}` },
+      h('input', { type: 'radio', name: 'portrait', checked: !person.photo, onchange: () => { delete person.photo; touch(); draw(); } }),
+      h('span', { class: 'portrait-none' }, initials(summarize(person))), h('span', { class: 'small' }, t('No photo'))),
+    photos.map((ph) => {
+      const tag = ph.tags.find((tg) => tg.person === person.id);
+      const img = lazyImage(() => adminImageURL(ph.id, 'thumb'), { alt: photoTitle(ph) });
+      img.style.objectPosition = `${tag.x * 100}% ${tag.y * 100}%`;
+      return h('label', { class: `portrait-choice${person.photo === ph.id ? ' on' : ''}` },
+        h('input', { type: 'radio', name: 'portrait', checked: person.photo === ph.id, onchange: () => { person.photo = ph.id; touch(); draw(); } }),
+        img, h('span', { class: 'small' }, photoTitle(ph)));
+    }));
+  draw();
+  return h('section', { class: 'panel' }, h('h2', {}, t('Photos')),
+    photos.length
+      ? [h('p', { class: 'muted small' }, t('Photos this person is tagged in. Choose one as their profile photo:')), box]
+      : h('p', { class: 'muted' }, t('No photos of this person yet. In '), h('a', { href: '#/photos' }, t('Photos')), t(', open a photo and click on their face to tag them.')));
 }
 
 // =====================================================================
@@ -811,6 +1232,8 @@ function helpPage() {
       h('p', {}, t('Your changes ARE safely saved. Before every update, automatic safety checks run; if one fails, the site keeps showing the previous version instead of a broken one. Usually this means something in the site’s code needs fixing, not your data. Open the "Actions" tab of the repository on GitHub to see which check failed, and ask for help.'))),
     item(t('Public or family-only?'),
       h('p', {}, t('Family-only people are encrypted with the family password before they leave your computer. Public people can be read by anyone with the link, and anything that was ever public stays in the history. Living people are always family-only. When unsure, choose family-only.'))),
+    item(t('Adding photos'),
+      h('p', {}, t('Go to Photos, drag pictures onto the dotted box, then click "Save & publish". Up to about 40 at a time works best. Click a photo to give it a title and date, and click on faces to tag people. Photos showing living or family-only people always stay family-only.'))),
     item(t('Running out of space'),
       h('p', {}, t('GitHub suggests keeping the archive under about 1 GB. Old versions of changed files are kept forever in the history, so replacing big files uses extra space. Keep your full-resolution originals elsewhere (an external drive and a cloud folder); the archive keeps smaller copies.'))),
     item(t('My token expired or stopped working'),

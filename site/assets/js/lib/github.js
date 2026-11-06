@@ -10,6 +10,7 @@ export class GitHubError extends Error {
 }
 
 const TREE_CHUNK = 400; // files per request when building a commit
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class GitHubRepo {
   /**
@@ -20,35 +21,47 @@ export class GitHubRepo {
    * @param {string} [o.branch]
    * @param {string} [o.root]  folder inside the repo where the site lives
    */
-  constructor({ owner, repo, token, branch = 'main', root = 'site/', fetchImpl }) {
+  constructor({ owner, repo, token, branch = 'main', root = 'site/', fetchImpl, sleepImpl }) {
     this.owner = owner;
     this.repo = repo;
     this.token = token;
     this.branch = branch;
     this.root = root;
     this.fetch = fetchImpl || ((...a) => globalThis.fetch(...a));
+    this.sleep = sleepImpl || sleep;
+    this.onWait = null; // called with seconds when GitHub asks us to slow down
   }
 
   async api(path, { method = 'GET', body, accept = 'application/vnd.github+json' } = {}) {
     const url = path.startsWith('http') ? path : `https://api.github.com${path}`;
-    const res = await this.fetch(url, {
-      method,
-      headers: {
-        Accept: accept,
-        Authorization: `Bearer ${this.token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-        ...(body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      cache: 'no-store',
-    });
-    if (!res.ok) {
-      let msg = res.statusText;
-      try { msg = (await res.json()).message || msg; } catch { /* not JSON */ }
-      throw new GitHubError(res.status, msg);
+    for (let attempt = 0; ; attempt++) {
+      const res = await this.fetch(url, {
+        method,
+        headers: {
+          Accept: accept,
+          Authorization: `Bearer ${this.token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        let msg = res.statusText;
+        try { msg = (await res.json()).message || msg; } catch { /* not JSON */ }
+        // GitHub limits how fast files can be uploaded. Wait and try again.
+        const limited = res.status === 429 || (res.status === 403 && /rate limit/i.test(msg));
+        if (limited && attempt < 5) {
+          const after = Number(res.headers?.get?.('retry-after')) || 60;
+          this.onWait?.(after);
+          await this.sleep(after * 1000);
+          continue;
+        }
+        throw new GitHubError(res.status, msg);
+      }
+      if (res.status === 204) return null;
+      return accept.includes('raw') ? res : res.json();
     }
-    if (res.status === 204) return null;
-    return accept.includes('raw') ? res : res.json();
   }
 
   get base() { return `/repos/${this.owner}/${this.repo}`; }
@@ -97,9 +110,12 @@ export class GitHubRepo {
    * changes: [{ path, content: string } | { path, bytes: Uint8Array } | { path, delete: true }]
    * Paths are relative to the site folder.
    */
-  async commit(message, changes) {
+  async commit(message, changes, { onProgress } = {}) {
     // Binary files are uploaded first (they don't depend on the latest commit).
     const entries = [];
+    const total = changes.filter((c) => c.bytes).length;
+    let done = 0;
+    if (total) onProgress?.({ done, total });
     for (const c of changes) {
       const path = this.root + c.path;
       if (c.delete) entries.push({ path, mode: '100644', type: 'blob', sha: null });
@@ -109,6 +125,7 @@ export class GitHubRepo {
           body: { content: toBase64(c.bytes), encoding: 'base64' },
         });
         entries.push({ path, mode: '100644', type: 'blob', sha: blob.sha });
+        onProgress?.({ done: ++done, total });
       } else entries.push({ path, mode: '100644', type: 'blob', content: c.content });
     }
 
