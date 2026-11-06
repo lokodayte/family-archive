@@ -1,0 +1,13 @@
+{
+  "name": "family-archive",
+  "private": true,
+  "type": "module",
+  "description": "A private family history archive. No build step and no dependencies.",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "serve": "python3 -m http.server 8080 --directory site"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

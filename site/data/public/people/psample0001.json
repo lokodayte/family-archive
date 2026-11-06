@@ -1,0 +1,74 @@
+{
+ "id": "psample0001",
+ "privacy": "public",
+ "living": false,
+ "sex": "male",
+ "names": {
+  "latin": {
+   "first": "Hovhannes",
+   "last": "Sampleyan",
+   "patronymic": "Grigori"
+  },
+  "armenian": {
+   "first": "Հովհաննես",
+   "last": "Սամփլյան"
+  },
+  "cyrillic": {
+   "first": "Ованес",
+   "last": "Сэмплян",
+   "patronymic": "Григорьевич"
+  }
+ },
+ "nicknames": [
+  "Vano"
+ ],
+ "birth": {
+  "date": {
+   "type": "about",
+   "date": "1880"
+  },
+  "place": "Kars"
+ },
+ "death": {
+  "date": {
+   "type": "exact",
+   "date": "1951-03-12"
+  },
+  "place": "Yerevan"
+ },
+ "occupation": "Blacksmith",
+ "languages": [
+  "Armenian",
+  "Russian",
+  "Turkish"
+ ],
+ "bio": "SAMPLE PERSON — not a real ancestor.\n\nHovhannes kept a forge near the market. Family stories say he could mend anything made of iron.",
+ "stories": [
+  {
+   "title": "The iron gate",
+   "text": "A made-up story: he once forged a gate that is said to still stand."
+  }
+ ],
+ "events": [
+  {
+   "id": "e1",
+   "type": "move",
+   "date": {
+    "type": "between",
+    "from": "1917",
+    "to": "1919"
+   },
+   "place": "Yerevan",
+   "description": "Left Kars with the family (sample event)."
+  }
+ ],
+ "sources": [
+  {
+   "id": "s1",
+   "fact": "Birth year",
+   "citation": "Memory of a granddaughter (sample)",
+   "type": "memory",
+   "confidence": "medium"
+  }
+ ]
+}

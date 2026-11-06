@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#f3ead8">
+  <title>Archive admin</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✎</text></svg>">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <link rel="stylesheet" href="../assets/css/admin.css">
+</head>
+<body class="admin">
+  <header class="site-header admin-header">
+    <a class="brand" href="#/people"><span class="brand-mark" aria-hidden="true">✎</span> <span>Archive admin</span></a>
+    <nav class="nav" aria-label="Admin" id="admin-nav" hidden>
+      <a href="#/people" data-page="people">People</a>
+      <a href="#/settings" data-page="settings">Settings</a>
+      <a href="#/help" data-page="help">Help</a>
+      <a href="../" target="_blank" rel="noopener">View site ↗</a>
+    </nav>
+    <div id="savebar" class="savebar" hidden></div>
+  </header>
+  <div id="banners"></div>
+  <main id="admin-view" class="view" tabindex="-1">
+    <p class="loading">Opening the admin panel…</p>
+  </main>
+  <script type="module" src="../assets/js/admin.js"></script>
+</body>
+</html>
