@@ -158,6 +158,44 @@ export class GitHubRepo {
     throw new GitHubError(409, 'The archive kept changing while saving. Please try again.');
   }
 
+  /** Past changes, newest first: [{ sha, parent, message, date, author }]. */
+  async listCommits({ page = 1, perPage = 30 } = {}) {
+    const data = await this.api(`${this.base}/commits?sha=${this.branch}&per_page=${perPage}&page=${page}`);
+    return data.map((c) => ({
+      sha: c.sha,
+      parent: c.parents?.[0]?.sha || null,
+      message: c.commit.message,
+      date: c.commit.author?.date || c.commit.committer?.date,
+      author: c.author?.login || c.commit.author?.name || '',
+    }));
+  }
+
+  /** One change with the list of files it touched (paths inside the site folder). */
+  async getCommit(sha) {
+    const c = await this.api(`${this.base}/commits/${sha}?per_page=300`);
+    const files = (c.files || []).map((f) => f.filename);
+    return {
+      sha,
+      parent: c.parents?.[0]?.sha || null,
+      message: c.commit.message,
+      date: c.commit.author?.date,
+      files: files.filter((f) => f.startsWith(this.root)).map((f) => f.slice(this.root.length)),
+      truncated: files.length >= 300,
+    };
+  }
+
+  /** path -> blob id for every file in the site folder at a commit (one request). */
+  async listTree(ref) {
+    const commit = await this.api(`${this.base}/git/commits/${ref || await this.getHead()}`);
+    const tree = await this.api(`${this.base}/git/trees/${commit.tree.sha}?recursive=1`);
+    const out = new Map();
+    for (const e of tree.tree || []) {
+      if (e.type === 'blob' && e.path.startsWith(this.root)) out.set(e.path.slice(this.root.length), e.sha);
+    }
+    out.truncated = !!tree.truncated;
+    return out;
+  }
+
   /** Size of the whole repository (including history), in KB. */
   async sizeKB() {
     return (await this.api(this.base)).size;

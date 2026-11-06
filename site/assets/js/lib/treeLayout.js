@@ -22,6 +22,11 @@ export function layoutTree(g, focus, opts = {}) {
   const down = opts.down ?? 3;
   const sortKeyOf = opts.sortKeyOf || (() => null);
   const sexOf = opts.sexOf || (() => 'unknown');
+  // Branches opened beyond the generation limit, or closed by hand.
+  const expandUp = opts.expandUp || new Set();
+  const expandDown = opts.expandDown || new Set();
+  const collapseUp = opts.collapseUp || new Set();
+  const collapseDown = opts.collapseDown || new Set();
   const nodes = [];
   const links = [];
   let n = 0;
@@ -29,7 +34,7 @@ export function layoutTree(g, focus, opts = {}) {
   const addNode = (id, x, y, role) => {
     const node = {
       key: `${id}#${n++}`, id, x, y, role,
-      moreUp: false, moreDown: false,
+      moreUp: false, moreDown: false, lessUp: false, lessDown: false,
     };
     nodes.push(node);
     return node;
@@ -50,8 +55,9 @@ export function layoutTree(g, focus, opts = {}) {
       ...g.spousesOf(id).slice().sort((a, b) => byBirth2(a.rel.start, b.rel.start)).map((s) => s.id),
       ...kids.flatMap((c) => parentIds(c).filter((p) => p !== id)),
     ]).filter((s) => s !== id);
-    const unit = { id, spouses, children: [], hasMoreDown: false };
-    if (depth < down) {
+    const unit = { id, spouses, children: [], hasMoreDown: false, open: false };
+    if (kids.length && !collapseDown.has(id) && (depth < down || expandDown.has(id))) {
+      unit.open = true;
       const otherParentIndex = (c) => {
         const ps = parentIds(c);
         const i = spouses.findIndex((s) => ps.includes(s));
@@ -84,6 +90,7 @@ export function layoutTree(g, focus, opts = {}) {
     }
     const me = pos.get(unit.id);
     me.moreDown = unit.hasMoreDown;
+    me.lessDown = unit.open;
     for (const sp of unit.spouses) {
       const s = pos.get(sp);
       const [a, b] = s.x < me.x ? [s, me] : [me, s];
@@ -110,16 +117,19 @@ export function layoutTree(g, focus, opts = {}) {
   function buildUp(id, depth, path) {
     const ps = parentIds(id).filter((p) => !path.has(p)).slice(0, 2);
     ps.sort((a, b) => (sexOf(a) === 'male' ? -1 : 0) - (sexOf(b) === 'male' ? -1 : 0));
-    const unit = { id, parents: [], hasMoreUp: false };
-    if (depth < up) unit.parents = ps.map((p) => buildUp(p, depth + 1, new Set([...path, p])));
-    else unit.hasMoreUp = ps.length > 0;
+    const unit = { id, parents: [], hasMoreUp: false, open: false };
+    if (ps.length && !collapseUp.has(id) && (depth < up || expandUp.has(id))) {
+      unit.parents = ps.map((p) => buildUp(p, depth + 1, new Set([...path, p])));
+      unit.open = true;
+    } else unit.hasMoreUp = ps.length > 0;
     unit.width = Math.max(SLOT, unit.parents.reduce((s, p) => s + p.width, 0));
     return unit;
   }
 
   function placeUp(unit, cx, y, existing) {
     const node = existing || addNode(unit.id, cx, y, 'ancestor');
-    if (!existing) node.moreUp = unit.hasMoreUp;
+    node.moreUp = unit.hasMoreUp;
+    node.lessUp = unit.open;
     let start = cx - unit.parents.reduce((s, p) => s + p.width, 0) / 2;
     const parentY = y - ROW_H;
     const midY = y - NODE_H / 2 - (ROW_H - NODE_H) / 2;
@@ -144,7 +154,6 @@ export function layoutTree(g, focus, opts = {}) {
   const downRoot = buildDown(focus, 0, new Set([focus]));
   const focusNode = placeDown(downRoot, 0, 0, 'focus');
   const upRoot = buildUp(focus, 0, new Set([focus]));
-  focusNode.moreUp = upRoot.hasMoreUp;
   placeUp(upRoot, focusNode.x, 0, focusNode);
 
   // Put the chosen person at (0, 0).

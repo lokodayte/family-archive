@@ -1,14 +1,16 @@
 // Everything the admin panel does with data: load, edit, group edits, save as one commit.
 import {
   createKeyring, unlockKeyring, wrapKey, generateDataKey, encryptJSON, decryptJSON,
-  encryptBytes, decryptBytes, DEFAULT_ITERATIONS,
+  encryptBytes, decryptBytes, DEFAULT_ITERATIONS, WrongPasswordError,
 } from './crypto.js';
+import { gitBlobSha } from './hash.js';
 import {
   summarize, normalizePerson, splitIndex, mergeIndexes, personPath, familyShardPath,
   PUBLIC_INDEX_PATH, CONFIG_PATH, SETTINGS_PATH, DEFAULT_SHARDS, relPeople, displayName,
   effectivePrivacy, effectivePhotoPrivacy, mediaPath, photoDetailsPath, splitPhoto, newId, compact,
 } from './model.js';
 import { buildGraph, findProblems, PROBLEM_TEXT } from './relations.js';
+import { estimateYear } from './dates.js';
 
 const involves = (r, id) => relPeople(r).includes(id);
 
@@ -388,6 +390,229 @@ export class AdminStore {
     return [...this.moves.values()].filter((m) => m.people?.includes(personId));
   }
 
+  // ---------- importing ----------
+
+  /** Add many people, links and places at once (e.g. from a GEDCOM file) as one change. */
+  importBatch({ people = [], rels = [], places = [] }, label = 'Imported people from a GEDCOM file') {
+    for (const pl of places) this.places.set(pl.id, compact(pl) || pl);
+    for (const person of people) {
+      const clean = normalizePerson(person);
+      this.pending.set(clean.id, { person: clean });
+      this.people.set(clean.id, summarize(clean));
+    }
+    this.rels.push(...rels);
+    this.ops.push({ text: `${label} (${people.length} people)`, public: false });
+  }
+
+  /** People who look like someone already in the archive (same name and birth year). */
+  likelyDuplicates(people) {
+    const key = (s) => `${displayName(s).toLowerCase()}|${estimateYear(s.birth?.date) ?? ''}`;
+    const named = (s) => !s.placeholder || displayName(s) !== 'Unknown person';
+    const existing = new Set([...this.people.values()].filter(named).map(key));
+    return people.filter((p) => named(p) && existing.has(key(p)));
+  }
+
+  // ---------- history and undo ----------
+
+  /** Read the whole archive as it was at a past change. */
+  async readSnapshot(ref) {
+    const cfgText = await this.repo.readText(CONFIG_PATH, ref);
+    const config = cfgText ? JSON.parse(cfgText) : {};
+    const pubText = await this.repo.readText(PUBLIC_INDEX_PATH, ref);
+    const pub = pubText ? JSON.parse(pubText) : { people: [], rels: [] };
+    const n = config.familyShards || DEFAULT_SHARDS;
+    const shards = [];
+    let settings = {};
+    if (config.crypto) {
+      const texts = await Promise.all(Array.from({ length: n }, (_, i) => this.repo.readText(familyShardPath(i), ref)));
+      for (const text of texts) shards.push(text ? await decryptJSON(this.key, text) : { people: [], rels: [] });
+      const st = await this.repo.readText(SETTINGS_PATH, ref);
+      settings = st ? await decryptJSON(this.key, st) : {};
+    }
+    return { config, settings, ...mergeIndexes(pub, shards) };
+  }
+
+  /** The encrypted "what changed" note saved with a change (null if none). */
+  async readChangeNote(changeId) {
+    const text = await this.repo.readText(`data/family/changes/${changeId}.enc`);
+    if (!text) return null;
+    try { return await decryptJSON(this.key, text); } catch { return null; }
+  }
+
+  async #readPersonAt(id, privacy, ref) {
+    const text = await this.repo.readText(personPath(id, privacy), ref);
+    if (!text) return null;
+    return privacy === 'public' ? JSON.parse(text) : decryptJSON(this.key, text);
+  }
+
+  async #readDetailsAt(id, privacy, ref) {
+    const text = await this.repo.readText(photoDetailsPath(id, privacy), ref);
+    if (!text) return { id };
+    return privacy === 'public' ? JSON.parse(text) : decryptJSON(this.key, text);
+  }
+
+  async #readMediaAt(summary, which, ref) {
+    const bytes = await this.repo.readBytes(mediaPath(summary, summary.privacy, which), ref);
+    if (!bytes) return null;
+    return summary.privacy === 'family' ? decryptBytes(this.key, bytes) : bytes;
+  }
+
+  /**
+   * Undo one past change by putting back what it changed — but only things that
+   * haven't been changed again since. Saves the result as a new change.
+   * Returns { undone, skipped: [descriptions], sha }.
+   */
+  async undoCommit(sha) {
+    if (this.pendingCount) throw new Error('Save or discard your other changes first.');
+    if (!this.key) throw new Error('Unlock with the family password first.');
+    const info = await this.repo.getCommit(sha);
+    if (!info.parent) throw new Error('The very first version of the archive can’t be undone.');
+    if (info.truncated) throw new Error('This change is too large to undo automatically.');
+    if (/family password/i.test(info.message)) throw new Error('Password changes can’t be undone here. Change the password again in Settings instead.');
+    const files = info.files.filter((f) => f.startsWith('data/') || f.startsWith('media/'));
+    if (!files.length) throw new Error('This was an update to the website itself, not to the archive, so there is nothing to undo.');
+
+    let before;
+    let after;
+    try {
+      before = await this.readSnapshot(info.parent);
+      after = await this.readSnapshot(sha);
+    } catch (err) {
+      if (err instanceof WrongPasswordError) throw new Error('This change was made before the family password was fully re-locked, so it can’t be undone automatically.');
+      throw err;
+    }
+
+    const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    const changed = (bm, am) => [...new Set([...bm.keys(), ...am.keys()])].filter((id) => !same(bm.get(id), am.get(id)));
+    const skipped = [];
+    let undone = 0;
+    const touchedFile = (path) => files.includes(path);
+
+    // People: their index summary, and their full record if the change touched it.
+    const peopleIds = new Set(changed(before.people, after.people));
+    for (const f of files) {
+      const m = f.match(/^data\/(?:public|family)\/people\/(.+)\.(?:json|enc)$/);
+      if (m) peopleIds.add(m[1]);
+    }
+    for (const id of peopleIds) {
+      const b = before.people.get(id);
+      const a = after.people.get(id);
+      const cur = this.people.get(id);
+      const name = displayName(b || a || cur || {});
+      if (!same(cur, a)) {
+        // A full-record-only change: compare the records themselves.
+        if (!(a && cur && same(cur, a))) { skipped.push(name); continue; }
+      }
+      if (a && cur && same(cur, a) && (touchedFile(personPath(id, 'public')) || touchedFile(personPath(id, 'family')))) {
+        const nowFull = await this.getPerson(id);
+        const afterFull = await this.#readPersonAt(id, a.privacy, sha);
+        const strip = (p) => { if (!p) return p; const { photo, ...rest } = p; return rest; };
+        if (afterFull && !same(strip(normalizePerson(nowFull)), strip(normalizePerson(afterFull)))) { skipped.push(name); continue; }
+      }
+      if (!b) {
+        // The change added this person: remove them again.
+        this.people.delete(id);
+        if (this.prevPrivacy.has(id)) this.pending.set(id, { deleted: true });
+        undone++;
+        continue;
+      }
+      let full = await this.#readPersonAt(id, b.privacy, info.parent);
+      if (!full) full = { ...b };
+      const clean = normalizePerson({ ...full, photo: b.photo });
+      if (!b.photo) delete clean.photo;
+      this.pending.set(id, { person: clean });
+      this.people.set(id, structuredClone(b));
+      this.personCache.delete(id);
+      undone++;
+    }
+
+    // Family links, places and moves live only in the index.
+    const relIndex = (list) => new Map(list.map((r) => [r.id, r]));
+    const relsBefore = relIndex(before.rels);
+    const relsAfter = relIndex(after.rels);
+    const relsNow = relIndex(this.rels);
+    for (const id of changed(relsBefore, relsAfter)) {
+      if (!same(relsNow.get(id), relsAfter.get(id))) { skipped.push('a family link'); continue; }
+      if (relsBefore.has(id)) relsNow.set(id, structuredClone(relsBefore.get(id)));
+      else relsNow.delete(id);
+      undone++;
+    }
+    this.rels = [...relsNow.values()].filter((r) => relPeople(r).every((pid) => this.people.has(pid)));
+
+    for (const [key, label] of [['places', 'a place'], ['moves', 'a move']]) {
+      for (const id of changed(before[key], after[key])) {
+        if (!same(this[key].get(id), after[key].get(id))) { skipped.push(label); continue; }
+        if (before[key].has(id)) this[key].set(id, structuredClone(before[key].get(id)));
+        else this[key].delete(id);
+        undone++;
+      }
+    }
+
+    // Photos: index entry, details, and the image itself if it was added, replaced or deleted.
+    const noPrivacy = (p) => { if (!p) return p; const { privacy, ...rest } = p; return rest; };
+    const photoIds = new Set(changed(before.photos, after.photos));
+    for (const f of files) {
+      const m = f.match(/^data\/(?:public|family)\/photos\/(.+)\.(?:json|enc)$/);
+      if (m) photoIds.add(m[1]);
+    }
+    for (const id of photoIds) {
+      const b = before.photos.get(id);
+      const a = after.photos.get(id);
+      const cur = this.photos.get(id);
+      if (!same(noPrivacy(cur), noPrivacy(a))) { skipped.push(b?.title || a?.title || 'a photo'); continue; }
+      if (!b) {
+        this.photos.delete(id);
+        if (this.prevPhotos.has(id)) this.pendingPhotos.set(id, { deleted: true });
+        undone++;
+        continue;
+      }
+      const pend = { details: await this.#readDetailsAt(id, b.privacy, info.parent) };
+      if (!a || (a.v || 1) !== (b.v || 1)) {
+        pend.image = await this.#readMediaAt(b, 'full', info.parent);
+        pend.thumb = await this.#readMediaAt(b, 'thumb', info.parent);
+        if (!pend.image || !pend.thumb) { skipped.push(b.title || 'a photo'); continue; }
+        // A new version number keeps browsers from showing a stale copy.
+        const latest = Math.max(b.v || 1, a?.v || 1, cur?.v || 1);
+        this.photos.set(id, { ...structuredClone(b), v: cur ? latest + 1 : b.v || 1 });
+      } else {
+        this.photos.set(id, { ...structuredClone(b), v: cur?.v ?? b.v });
+      }
+      this.pendingPhotos.set(id, pend);
+      undone++;
+    }
+
+    // Settings
+    if (!same(before.settings, after.settings)) {
+      if (same(this.familySettings, after.settings)) { this.familySettings = structuredClone(before.settings); this.settingsDirty = true; undone++; } else skipped.push('family settings');
+    }
+    if ((before.config.siteTitle || '') !== (after.config.siteTitle || '')) {
+      if ((this.config.siteTitle || '') === (after.config.siteTitle || '')) { this.config = { ...this.config, siteTitle: before.config.siteTitle }; this.configDirty = true; undone++; } else skipped.push('the archive title');
+    }
+
+    if (!undone) return { undone: 0, skipped, sha: null };
+    // The private note says exactly what was undone; the public label stays general.
+    const changeId = info.message.match(/Change-Id: (\w+)/)?.[1];
+    const note = changeId ? await this.readChangeNote(changeId) : null;
+    const what = note?.ops?.length ? note.ops.join('; ') : info.message.split('\n')[0].replace(/^Archive: /, '');
+    this.ops.push({ text: `Undid: ${what}`, undo: true });
+    const result = await this.save();
+    return { undone, skipped: [...new Set(skipped)], sha: result?.sha || null };
+  }
+
+  /**
+   * Read a file as it is now, quickly: use the published copy when it is
+   * exactly the latest version (same git blob id), otherwise ask GitHub.
+   */
+  async readLatestBytes(path, tree) {
+    if (this.siteLoader && tree?.has(path)) {
+      try {
+        const bytes = await this.siteLoader(path);
+        if (bytes && await gitBlobSha(bytes) === tree.get(path)) return bytes;
+      } catch { /* fall back */ }
+    }
+    return this.repo.readBytes(path, this.head);
+  }
+
   // ---------- settings ----------
 
   setFamilySettings(settings) {
@@ -406,7 +631,7 @@ export class AdminStore {
 
   commitMessage() {
     // Never put family-only names in commit messages: the repository is public.
-    const generic = (o) => o.photo || o.place || o.move;
+    const generic = (o) => o.photo || o.place || o.move || o.undo;
     const pub = this.ops.filter((o) => o.public && !generic(o)).map((o) => o.text);
     const count = (k, word) => {
       const n = this.ops.filter((o) => o[k]).length;
@@ -414,7 +639,9 @@ export class AdminStore {
       return n;
     };
     const parts = [...pub];
-    const photos = count('photo', 'photo') + count('place', 'place') + count('move', 'move');
+    const undos = this.ops.filter((o) => o.undo).length;
+    if (undos) parts.unshift('Undo of an earlier change');
+    const photos = undos + count('photo', 'photo') + count('place', 'place') + count('move', 'move');
     const fam = this.ops.length - pub.length - photos;
     if (fam) parts.push(`${fam} family-only change${fam === 1 ? '' : 's'}`);
     return parts.length ? `Archive: ${parts.join('; ')}` : 'Archive update';
@@ -516,7 +743,17 @@ export class AdminStore {
   async save({ onProgress } = {}) {
     const { changes, publicIndex, familyShards, pubText, shardTexts, finalPhotos } = await this.buildChanges();
     if (!changes.length) { this.clearPending(); return null; }
-    const result = await this.repo.commit(this.commitMessage(), changes, { onProgress });
+    // An encrypted note of exactly what changed (with names), for the "Recent changes" page.
+    const changeId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14) + newId('').slice(0, 5);
+    let message = this.commitMessage();
+    if (this.key) {
+      changes.push({
+        path: `data/family/changes/${changeId}.enc`,
+        content: await encryptJSON(this.key, { at: new Date().toISOString(), ops: this.ops.map((o) => o.text) }),
+      });
+      message += `\n\nChange-Id: ${changeId}`;
+    }
+    const result = await this.repo.commit(message, changes, { onProgress });
     // Success: what we saved is now the starting point.
     for (const [id, p] of this.pending) {
       if (p.deleted) this.personCache.delete(id);
@@ -590,6 +827,13 @@ export class AdminStore {
       changes.push({ path: familyShardPath(i), content: await encryptJSON(newKey, familyShards[i]) });
     }
     changes.push({ path: SETTINGS_PATH, content: await encryptJSON(newKey, this.familySettings) });
+    // The "what changed" notes contain names too.
+    const tree = await this.repo.listTree(this.head);
+    for (const path of tree.keys()) {
+      if (!path.startsWith('data/family/changes/')) continue;
+      const text = await this.repo.readText(path, this.head);
+      try { changes.push({ path, content: await encryptJSON(newKey, await decryptJSON(this.key, text)) }); } catch { /* unreadable old note: leave it */ }
+    }
     const crypto = await wrapKey(newKey, newPassword, this.iterations);
     const config = { ...this.config, crypto };
     changes.push({ path: CONFIG_PATH, content: JSON.stringify(config, null, 2) });

@@ -15,10 +15,11 @@ import { filterPhotos, galleryFacets, sortPhotos } from './lib/gallery.js';
 import { photoTitle } from './lib/model.js';
 import { placeText, MOVE_REASONS } from './lib/places.js';
 import { createMapPages } from './mapPages.js';
+import { howRelated, shortestPath } from './lib/relate.js';
 
 const archive = new Archive('');
 const view = document.getElementById('view');
-let treeState = { up: 3, down: 3 };
+let treeState = { view: 'hourglass', up: 3, down: 3, open: { up: new Set(), down: new Set() }, closed: { up: new Set(), down: new Set() }, focus: null };
 let currentTree = null;
 
 // ---------- small pieces ----------
@@ -102,7 +103,8 @@ function homePage() {
       h('p', { class: 'lead' }, t('So we remember who we are and where we come from.')),
       searchBox(showResults),
       results,
-      h('p', { class: 'muted small' }, t('{n} people in the archive', { n: all.length }))),
+      h('p', { class: 'muted small' }, t('{n} people in the archive', { n: all.length }), ' · ',
+        h('a', { href: '#/relate' }, t('How are we related?')))),
     lockedNotice(),
     albumStrip(),
     earliest.length && h('section', {},
@@ -274,6 +276,7 @@ async function profilePage(id) {
         h('div', { class: 'actions' },
           h('a', { class: 'btn', href: `#/tree/${id}` }, '🌳 ', t('See in family tree')),
           hasMapData(id) && h('a', { class: 'btn btn-quiet', href: `#/map?person=${id}` }, '🗺 ', t('See on the map')),
+          h('a', { class: 'btn btn-quiet', href: `#/relate?a=${id}` }, '⇄ ', t('How are we related?')),
           correctionLink(p),
           hasAdmin && h('a', { class: 'btn btn-quiet', href: `admin/#/person/${id}` }, '✎ ', t('Edit'))))),
     h('div', { class: 'profile-grid' },
@@ -317,41 +320,147 @@ function defaultFocus() {
 function treePage(id) {
   const focus = id && archive.people.has(id) ? id : defaultFocus();
   if (!focus) return [h('h1', {}, t('Family tree')), h('p', {}, t('No people yet.')), lockedNotice()];
+  if (treeState.focus !== focus) {
+    // New person in the middle: forget opened/closed branches.
+    treeState.focus = focus;
+    for (const k of ['open', 'closed']) { treeState[k].up.clear(); treeState[k].down.clear(); }
+  }
   const s = archive.people.get(focus);
   const stage = h('div', { class: 'tree-stage' });
-  const genSelect = (label, key) => h('label', { class: 'gen-select' }, label, ' ',
+  const views = {
+    hourglass: [t('Ancestors and descendants'), treeState.up, treeState.down],
+    ancestors: [t('Ancestors only'), treeState.up, 0],
+    descendants: [t('Descendants only'), 0, treeState.down],
+  };
+  const [, up, down] = views[treeState.view];
+  const genSelect = (label, key, value) => h('label', { class: 'gen-select' }, label, ' ',
     h('select', {
-      value: String(treeState[key]),
+      value: String(value),
       onchange: (e) => { treeState[key] = Number(e.target.value); route(); },
-    }, [1, 2, 3, 4, 5, 6].map((n) => h('option', { value: String(n) }, String(n)))));
+    }, [1, 2, 3, 4, 5, 6, 7, 8].map((n) => h('option', { value: String(n) }, String(n)))));
   const panel = h('div', { class: 'tree-panel' },
     h('div', {},
       h('strong', {}, displayName(s)), ' ', h('span', { class: 'muted' }, lifespan(s))),
-    h('a', { class: 'btn', href: `#/person/${focus}` }, t('Open profile')));
+    h('div', { class: 'actions' },
+      h('a', { class: 'btn btn-quiet btn-small', href: `#/relate?a=${focus}` }, t('How are we related?')),
+      h('a', { class: 'btn btn-small', href: `#/person/${focus}` }, t('Open profile'))));
 
-  queueMicrotask(() => {
+  const draw = () => {
     currentTree?.destroy();
     currentTree = renderTree(stage, {
-      graph: archive.graph, people: archive.people, focus,
-      up: treeState.up, down: treeState.down,
+      graph: archive.graph, people: archive.people, focus, up, down,
+      expandUp: treeState.open.up, expandDown: treeState.open.down,
+      collapseUp: treeState.closed.up, collapseDown: treeState.closed.down,
       onSelect: (pid) => { location.hash = `#/tree/${pid}`; },
+      onToggle: (pid, dir, action) => {
+        if (action === 'open') { treeState.open[dir].add(pid); treeState.closed[dir].delete(pid); } else { treeState.closed[dir].add(pid); treeState.open[dir].delete(pid); }
+        draw();
+      },
     });
-  });
+  };
+  queueMicrotask(draw);
 
   return [
     h('div', { class: 'tree-head' },
       h('h1', {}, t('Family tree')),
       h('div', { class: 'tree-controls' },
-        genSelect(t('Generations up'), 'up'),
-        genSelect(t('Generations down'), 'down'),
+        h('label', { class: 'gen-select' }, t('Show'), ' ',
+          h('select', {
+            value: treeState.view,
+            onchange: (e) => {
+              treeState.view = e.target.value;
+              // A one-direction view has room for more generations.
+              if (treeState.view === 'ancestors') treeState.up = Math.max(treeState.up, 4);
+              if (treeState.view === 'descendants') treeState.down = Math.max(treeState.down, 4);
+              route();
+            },
+          },
+            Object.entries(views).map(([k, [label]]) => h('option', { value: k }, label)))),
+        up ? genSelect(t('Generations up'), 'up', up) : null,
+        down ? genSelect(t('Generations down'), 'down', down) : null,
         h('span', { class: 'zoom-buttons' },
           h('button', { class: 'btn btn-icon', 'aria-label': t('Zoom in'), onclick: () => currentTree?.zoomBy(0.8) }, '+'),
           h('button', { class: 'btn btn-icon', 'aria-label': t('Zoom out'), onclick: () => currentTree?.zoomBy(1.25) }, '−'),
           h('button', { class: 'btn btn-quiet', onclick: () => currentTree?.fit() }, t('Fit'))))),
-    h('p', { class: 'muted small tree-help' }, t('Drag to move, scroll or pinch to zoom. Click a person to put them in the centre. Small arrows mean there are more relatives beyond the edge.')),
+    h('p', { class: 'muted small tree-help' }, t('Drag to move, scroll or pinch to zoom. Click a person to put them in the centre. Use the round ▲ ▼ buttons to open a branch, and – to fold it away.')),
     lockedNotice(),
     stage,
     panel,
+  ];
+}
+
+// ---------- how are we related? ----------
+
+function personChooser(label, currentId, onPick) {
+  const input = h('input', {
+    type: 'search', class: 'search-input', autocomplete: 'off', placeholder: t('Type a name…'),
+    value: currentId && archive.people.has(currentId) ? displayName(archive.people.get(currentId)) : '',
+    'aria-label': label,
+  });
+  const list = h('ul', { class: 'picker-list', hidden: true, role: 'listbox' });
+  let items = [];
+  let active = 0;
+  const render = () => {
+    items = searchPeople(archive.people, input.value, 8);
+    active = 0;
+    clear(list, items.map((s, i) => h('li', {
+      role: 'option', class: i === active ? 'active' : '',
+      onmousedown: (e) => { e.preventDefault(); onPick(s.id); },
+    }, displayName(s), h('span', { class: 'muted small' }, ` ${lifespan(s)}`))));
+    list.hidden = !items.length;
+  };
+  input.addEventListener('input', debounce(render, 60));
+  input.addEventListener('focus', () => input.select());
+  input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 150));
+  input.addEventListener('keydown', (e) => {
+    if (list.hidden) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      active = (active + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      [...list.children].forEach((li, i) => li.classList.toggle('active', i === active));
+    } else if (e.key === 'Enter' && items[active]) { e.preventDefault(); onPick(items[active].id); }
+  });
+  return h('label', { class: 'field relate-field' }, h('span', {}, label), h('div', { class: 'picker' }, input, list));
+}
+
+// Read top to bottom: "Davit — whose parent is — Armen — whose parent is — Grigor..."
+const VIA_TEXT = { parent: 'whose parent is', child: 'whose child is', spouse: 'married to' };
+
+function relatePage(query) {
+  const a = archive.people.has(query.a) ? query.a : '';
+  const b = archive.people.has(query.b) ? query.b : '';
+  const go = (na, nb) => { location.hash = `#/relate?${new URLSearchParams({ ...(na ? { a: na } : {}), ...(nb ? { b: nb } : {}) })}`; };
+  let result = null;
+  if (a && b) {
+    const opts = { sexOf: (id) => archive.people.get(id)?.sex, nameOf: (id) => displayName(archive.people.get(id)) };
+    const r = howRelated(archive.graph, a, b, opts);
+    const back = howRelated(archive.graph, b, a, opts);
+    const name = (id) => link(id);
+    const sentence = (x, y, rr) => (rr.kind === 'chain' || rr.kind === 'none'
+      ? [name(y), ' ', t('and'), ' ', name(x), ' ', t(rr.kind === 'chain' ? 'are connected through the family, but not by blood or a direct marriage.' : 'are not connected in this archive yet.')]
+      : [name(y), ' ', t('is'), ' ', name(x), t('’s'), ' ', h('strong', {}, t(rr.text)), '.']);
+    const chain = r.kind === 'chain' ? r.path : shortestPath(archive.graph, a, b);
+    result = h('section', { class: 'panel relate-result' },
+      h('p', { class: 'relate-sentence' }, sentence(a, b, r)),
+      r.kind !== 'chain' && r.kind !== 'none' && a !== b ? h('p', { class: 'muted' }, sentence(b, a, back)) : null,
+      r.common?.length && r.kind === 'blood' && r.a > 0 && r.b > 0 ? h('div', { class: 'family-group' },
+        h('h3', {}, t(r.common.length > 1 ? 'Closest common ancestors' : 'Closest common ancestor')),
+        h('div', { class: 'chips' }, r.common.map((id) => personChip(id)))) : null,
+      chain && chain.length > 2 ? h('div', { class: 'family-group' },
+        h('h3', {}, t('The connection, step by step')),
+        h('ol', { class: 'relate-chain' }, chain.map((step, i) => h('li', {},
+          i > 0 ? h('span', { class: 'muted small' }, `↓ ${t(VIA_TEXT[step.via] || '')}`) : null,
+          personChip(step.id))))) : null);
+  }
+  return [
+    h('h1', {}, t('How are we related?')),
+    h('p', { class: 'muted' }, t('Choose any two people to see how they are related.')),
+    lockedNotice(),
+    h('div', { class: 'relate-pickers' },
+      personChooser(t('First person'), a, (id) => go(id, b)),
+      h('button', { class: 'btn btn-icon relate-swap', 'aria-label': t('Swap'), title: t('Swap'), onclick: () => go(b, a) }, '⇄'),
+      personChooser(t('Second person'), b, (id) => go(a, id))),
+    result,
   ];
 }
 
@@ -587,6 +696,7 @@ async function route() {
     else if (page === 'tree') content = treePage(id && decodeURIComponent(id));
     else if (page === 'gallery') content = galleryPage();
     else if (page === 'map') content = mapPages.mapPage(readQuery());
+    else if (page === 'relate') content = relatePage(readQuery());
     else if (page === 'place' && id) content = mapPages.placePage(decodeURIComponent(id));
     else if (page === 'photo' && id) content = await photoPage(decodeURIComponent(id));
     else content = homePage();
@@ -598,6 +708,7 @@ async function route() {
   clear(view, content);
   view.classList.toggle('wide', ['tree', 'photo', 'gallery', 'map'].includes(page));
   if (page !== 'map') mapPages.leave();
+  document.querySelector('.nav a.active')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   const title = archive.config.siteTitle || t('Our Family Archive');
   const heading = view.querySelector('h1')?.textContent;
   document.title = heading && heading !== title ? `${heading} — ${title}` : title;

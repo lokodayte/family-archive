@@ -20,9 +20,12 @@ function truncate(text, max) {
 /**
  * @returns {{ zoomBy(f), fit(), destroy() }}
  */
-export function renderTree(container, { graph, people, focus, up = 3, down = 3, onSelect }) {
+export function renderTree(container, {
+  graph, people, focus, up = 3, down = 3, onSelect, onToggle,
+  expandUp, expandDown, collapseUp, collapseDown,
+}) {
   const layout = layoutTree(graph, focus, {
-    up, down,
+    up, down, expandUp, expandDown, collapseUp, collapseDown,
     sortKeyOf: (id) => sortKey(people.get(id)?.birth?.date),
     sexOf: (id) => people.get(id)?.sex,
   });
@@ -56,8 +59,20 @@ export function renderTree(container, { graph, people, focus, up = 3, down = 3, 
     const sub = s('text', { x: 20, y: 47, class: 'tree-dates' });
     sub.textContent = lifespan(p);
     g.append(title, sub, s('title', {}, document.createTextNode(`${name} ${lifespan(p)}`)));
-    if (node.moreUp) g.append(s('path', { d: `M${NODE_W / 2 - 7},-3 l7,-8 l7,8 z`, class: 'tree-more' }));
-    if (node.moreDown) g.append(s('path', { d: `M${NODE_W / 2 - 7},${NODE_H + 3} l7,8 l7,-8 z`, class: 'tree-more' }));
+    // Little buttons to open (▲ ▼) or close (–) a branch.
+    const toggle = (dir, action, cy, shape) => {
+      const b = s('g', { class: `tree-toggle tree-${action}`, 'data-dir': dir, 'data-action': action, 'data-id': node.id, transform: `translate(${NODE_W / 2},${cy})` },
+        s('circle', { r: 10 }), s('path', { d: shape }));
+      b.append(s('title', {}, document.createTextNode(t(action === 'open' ? (dir === 'up' ? 'Show parents' : 'Show children') : (dir === 'up' ? 'Hide parents' : 'Hide children')))));
+      g.append(b);
+    };
+    const tri = (up) => (up ? 'M-5,3 L0,-4 L5,3 Z' : 'M-5,-3 L0,4 L5,-3 Z');
+    const minus = 'M-5,0 H5';
+    if (node.moreUp && node.role !== 'spouse') toggle('up', 'open', -12, tri(true));
+    else if (node.moreUp) g.append(s('path', { d: `M${NODE_W / 2 - 6},-3 l6,-7 l6,7 z`, class: 'tree-more' }));
+    else if (node.lessUp) toggle('up', 'close', -12, minus);
+    if (node.moreDown) toggle('down', 'open', NODE_H + 12, tri(false));
+    else if (node.lessDown) toggle('down', 'close', NODE_H + 12, minus);
     g.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect?.(node.id); }
     });
@@ -69,7 +84,26 @@ export function renderTree(container, { graph, people, focus, up = 3, down = 3, 
   // ---------- view box, zoom and pan ----------
   const b = layout.bounds;
   let vb = { x: 0, y: 0, w: 1, h: 1 };
-  const apply = () => svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  // Big trees: only boxes near the visible area are drawn.
+  const nodeEls = [...world.querySelectorAll('.tree-node')].map((el) => {
+    const m = el.getAttribute('transform').match(/translate\(([-\d.]+),([-\d.]+)\)/);
+    return { el, x: Number(m[1]), y: Number(m[2]) };
+  });
+  let cullQueued = false;
+  const cull = () => {
+    cullQueued = false;
+    if (nodeEls.length < 150) return;
+    const mx = vb.w * 0.3;
+    const my = vb.h * 0.3;
+    for (const n of nodeEls) {
+      const visible = n.x + NODE_W > vb.x - mx && n.x < vb.x + vb.w + mx && n.y + NODE_H > vb.y - my && n.y < vb.y + vb.h + my;
+      n.el.style.display = visible ? '' : 'none';
+    }
+  };
+  const apply = () => {
+    svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    if (!cullQueued) { cullQueued = true; requestAnimationFrame(cull); }
+  };
 
   function fit() {
     const pad = 40;
@@ -117,7 +151,7 @@ export function renderTree(container, { graph, people, focus, up = 3, down = 3, 
     svg.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     moved = 0;
-    downTarget = e.target.closest?.('.tree-node');
+    downTarget = e.target.closest?.('.tree-toggle') || e.target.closest?.('.tree-node');
     if (pointers.size === 2) {
       const [a, c] = [...pointers.values()];
       pinchDist = Math.hypot(a.x - c.x, a.y - c.y);
@@ -145,7 +179,10 @@ export function renderTree(container, { graph, people, focus, up = 3, down = 3, 
     }
   });
   const end = (e) => {
-    if (pointers.size === 1 && moved < 6 && downTarget) onSelect?.(downTarget.dataset.id);
+    if (pointers.size === 1 && moved < 6 && downTarget) {
+      if (downTarget.classList.contains('tree-toggle')) onToggle?.(downTarget.dataset.id, downTarget.dataset.dir, downTarget.dataset.action);
+      else onSelect?.(downTarget.dataset.id);
+    }
     pointers.delete(e.pointerId);
     if (pointers.size < 2) pinchDist = 0;
     downTarget = null;

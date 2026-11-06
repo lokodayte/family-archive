@@ -18,13 +18,15 @@ You manage everything from the admin panel in your browser. You never need to ed
 5. [Dates that aren't exact](#dates)
    - [Photos and scanned documents](#photos)
    - [Places, moves and the map](#places)
+   - [The family tree and "How are we related?"](#tree)
+   - [History and undo](#history)
 6. [Public or family-only?](#privacy)
 7. [Saving and publishing](#saving)
 8. [Changing the family password](#password)
 9. [Backups: keep your originals safe](#backups)
 10. [If something breaks](#if-something-breaks)
 11. [Practising without changing anything](#practice)
-12. [What's coming next](#coming-next)
+12. [Ideas for later](#coming-next)
 
 ---
 
@@ -168,6 +170,23 @@ A move is public only if everyone in it is public, and the same goes for places.
 
 The background map comes from **OpenStreetMap** (free, no account). Viewing the map loads map tiles from OpenStreetMap's servers, as any online map does.
 
+<a id="tree"></a>
+## 5d. The family tree and "How are we related?"
+
+- **Tree → Show:** *Ancestors and descendants*, *Ancestors only* or *Descendants only*. You can choose how many generations to show.
+- The round **▲ / ▼** buttons on a box open that branch even beyond the generation limit. The faint **–** button folds a branch away. Click any person to put them in the centre.
+- Very large trees stay fast: only the part you're looking at is drawn.
+- **How are we related?** (on the home page, on every profile and under the tree): choose two people. The answer is a sentence such as *"Lusine is Davit's half-great-aunt"*, with their closest common ancestor and the chain of family links step by step. It handles cousins (*second cousin once removed*), half relations, in-laws, step-parents and spouses.
+
+<a id="history"></a>
+## 5e. History and undo
+
+Admin → **History** lists every saved change, newest first, with what changed. Family-only names are shown here because the details are stored encrypted.
+- **↶ Undo** puts back what that change altered. If something has been changed again since, it is left as it is now, and you're told what was skipped.
+- An undo is saved as a new change, so you can undo an undo.
+- "Website update" entries are changes to how the site works, not to your data, so they can't be undone here.
+- Changes from before a **full re-lock** of the family password can't be undone automatically.
+
 <a id="privacy"></a>
 ## 6. Public or family-only?
 
@@ -201,8 +220,16 @@ Admin panel → **Settings → Family password**:
 <a id="backups"></a>
 ## 9. Backups: keep your originals safe
 
-- **Every change is kept in the history.** GitHub stores every version of every file, so mistakes can be undone. (An undo button is coming in Phase 4.)
-- **Download a copy:** on the repository's GitHub page, click **Code → Download ZIP**. (A "Download full backup" button that includes readable family data is coming in Phase 4.)
+- **Every change is kept in the history.** Mistakes can be undone from admin → **History**.
+- **Download a full backup:** admin → **Backup → With photos**. You get one ZIP file containing:
+  - `archive.json`: everything, in readable form
+  - `family.ged`: the tree for other genealogy programs
+  - `people.txt`: a simple list of everyone
+  - `photos/`: every photo, named by year, title and people
+
+  ⚠️ The backup is **not encrypted** (it contains family-only information), so keep it somewhere private. Make one a few times a year; the admin panel reminds you after 90 days.
+- **GEDCOM:** admin → **Backup → Export GEDCOM file** to move the tree to Gramps, MyHeritage, Ancestry, RootsMagic and similar programs. **Import a GEDCOM file…** adds people from such a program (everyone comes in as family-only, and likely duplicates are pointed out first).
+- **An exact encrypted copy:** the "download the repository ZIP" link on the Backup page.
 - **Keep full-resolution originals of photos and scans outside the site:** for example on an external drive *and* in a cloud folder. The archive stores smaller, web-friendly copies to stay within GitHub's ~1 GB limit.
 - Keep the family password and a note about where the originals are in a safe place, such as a sealed envelope with important papers.
 
@@ -215,7 +242,7 @@ Admin panel → **Settings → Family password**:
 | Admin asks for the token again | It probably expired. Make a new one ([step 2a](#first-time-setup)). |
 | "That family password is not right" | Check spelling and capital letters. If the password was changed, ask for the new one. |
 | The site looks old after saving | Wait a minute, then refresh the page. |
-| Something is wrong with the data | Every earlier version is in the history (**Commits** on the repository page). Nothing is ever truly lost. Ask for help restoring it. |
+| Something is wrong with the data | Admin → **History** → **Undo** on the change that caused it. Every earlier version is kept, so nothing is ever truly lost. |
 | A photo is refused when uploading | It's probably an iPhone HEIC or an unusual format. Export it as JPEG and try again. |
 | Saving stops at "GitHub asked us to slow down" | That's normal for big batches. Keep the page open; it carries on by itself. |
 | Storage warning (70%) | See [backups](#backups). Old versions of replaced photos count too, so avoid uploading the same big file repeatedly. |
@@ -233,9 +260,11 @@ npm run serve            # then open http://localhost:8080/admin/?practice
 Practice mode works like the real admin panel but never sends anything to GitHub.
 
 <a id="coming-next"></a>
-## 12. What's coming next
+## 12. Ideas for later
 
-- **Phase 4:** a recent-changes page with undo, a full backup ZIP, GEDCOM import and export, a fuller tree, "How are we related?", and more mobile polish.
+- Armenian and Russian versions of the interface. Everything is ready for translation files (see "For developers").
+- Merging two people who turn out to be the same person (for example after a GEDCOM import).
+- Printable family-tree posters and family-group sheets.
 
 ---
 

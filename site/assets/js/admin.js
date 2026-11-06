@@ -17,6 +17,8 @@ import {
   searchPlaces, placeText, placeLabel, hasCoords, allPlaceNames, countryAt, MOVE_REASONS,
 } from './lib/places.js';
 import { loadLeaflet, baseTiles, geocode } from './lib/leaflet.js';
+import { buildBackup, gatherPeople } from './lib/backup.js';
+import { exportGedcom, importGedcom } from './lib/gedcom.js';
 import { parseDate, formatDate, DATE_HELP, sortKey as sortKeyOf } from './lib/dates.js';
 import { PARENT_KINDS } from './lib/relations.js';
 import { lifespan, EVENT_TYPES } from './lib/timeline.js';
@@ -329,7 +331,14 @@ function storageMeter() {
 }
 
 function renderBanners() {
-  for (const el of banners.querySelectorAll('.storage-warn')) el.remove();
+  for (const el of banners.querySelectorAll('.storage-warn, .backup-reminder')) el.remove();
+  const last = safeStorage.get('localStorage', scopedKey('lastBackup'));
+  const days = last ? (Date.now() - Date.parse(last)) / 86_400_000 : Infinity;
+  if (store && store.people.size >= 15 && days > 90) {
+    banners.append(h('div', { class: 'notice backup-reminder' },
+      h('p', {}, last ? t('Your last full backup on this device was {n} days ago.', { n: Math.round(days) }) : t('You haven’t downloaded a full backup on this device yet.')),
+      h('a', { class: 'btn btn-small', href: '#/backup' }, t('Make a backup'))));
+  }
   if (storageKB != null && storageKB / STORAGE_LIMIT_KB >= 0.7) {
     banners.append(h('div', { class: 'notice notice-warn storage-warn' },
       h('p', {}, t('Storage is over 70% full. Before adding many more photos, read "Running out of space" in the Help page.'))));
@@ -352,13 +361,17 @@ async function route() {
     editorDirty = false;
   }
   const section = { person: 'people', new: 'people', photo: 'photos', place: 'places', move: 'moves' }[page] || page || 'people';
+  if (page !== 'history') historyPageNo = 1;
   document.querySelectorAll('#admin-nav a[data-page]').forEach((a) => a.classList.toggle('active', a.dataset.page === section));
+  document.querySelector('#admin-nav a.active')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   if (page === 'person' && id) await editorPage(decodeURIComponent(id));
   else if (page === 'photos') photosPage();
   else if (page === 'photo' && id) await photoEditorPage(decodeURIComponent(id));
   else if (page === 'places') placesPage();
   else if (page === 'place' && id) await placeEditorPage(decodeURIComponent(id));
   else if (page === 'moves') movesPage();
+  else if (page === 'history') await historyPage();
+  else if (page === 'backup') backupPage();
   else if (page === 'move' && id) moveEditorPage(decodeURIComponent(id), params);
   else if (page === 'new') await editorPage(null);
   else if (page === 'settings') settingsPage();
@@ -1560,6 +1573,193 @@ function personMovesSection(person, isNew) {
 }
 
 // =====================================================================
+// History (recent changes) and undo
+// =====================================================================
+
+let historyPageNo = 1;
+
+function describeCommit(c) {
+  const first = c.message.split('\n')[0];
+  if (first.startsWith('Archive: ')) return { kind: 'archive', text: first.slice(9) };
+  if (/family password/i.test(first)) return { kind: 'password', text: first };
+  return { kind: 'website', text: t('Website update (changes to how the site works, not to your data)') };
+}
+
+async function historyPage() {
+  const list = h('div', { class: 'history-list' });
+  clear(view,
+    h('h1', {}, t('Recent changes')),
+    h('p', { class: 'muted' }, t('Every save is kept. "Undo" puts back what that change altered — except things that were changed again since, which are left alone and listed.')),
+    store.pendingCount ? h('div', { class: 'notice' }, h('p', {}, t('Save or discard your unsaved changes before undoing anything.'))) : null,
+    list);
+  clear(list, h('p', { class: 'loading' }, t('Loading…')));
+  let commits;
+  try {
+    commits = [];
+    for (let pg = 1; pg <= historyPageNo; pg++) commits.push(...await store.repo.listCommits({ page: pg, perPage: 30 }));
+  } catch (err) {
+    clear(list, h('p', { class: 'form-message' }, t('Could not load the history: {msg}', { msg: err.message })));
+    return;
+  }
+  const rows = commits.map((c) => {
+    const d = describeCommit(c);
+    const when = new Date(c.date);
+    const details = h('ul', { class: 'history-ops' });
+    const changeId = c.message.match(/Change-Id: (\w+)/)?.[1];
+    if (changeId) {
+      store.readChangeNote(changeId).then((note) => {
+        if (note?.ops?.length) clear(details, note.ops.map((op) => h('li', {}, op)));
+      }).catch(() => {});
+    }
+    const canUndo = d.kind === 'archive' && !!c.parent && !store.pendingCount;
+    const undoBtn = d.kind === 'archive' ? h('button', {
+      class: 'btn btn-quiet btn-small', disabled: !canUndo,
+      onclick: async (e) => {
+        if (!confirm(t('Undo this change?\n\n“{text}”\n\nThis is saved as a new change, so it can itself be undone.', { text: d.text }))) return;
+        e.target.disabled = true;
+        e.target.textContent = t('Undoing…');
+        try {
+          const r = await store.undoCommit(c.sha);
+          if (!r.undone) {
+            alert(t('Nothing was undone: everything in that change has been changed again since ({items}).', { items: r.skipped.join(', ') }));
+          } else {
+            if (r.skipped.length) alert(t('Undone. These were changed again later, so they were left as they are now: {items}.', { items: r.skipped.join(', ') }));
+            else toast(t('Undone. The site updates in about a minute.'), 'ok');
+            publishState = { state: 'publishing', sha: r.sha };
+            renderSavebar();
+            watchPublish(r.sha);
+          }
+        } catch (err) {
+          alert(err.message);
+        }
+        historyPage();
+      },
+    }, '↶ ', t('Undo')) : null;
+    return h('div', { class: `history-row history-${d.kind}` },
+      h('div', { class: 'history-when' },
+        h('strong', {}, when.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })),
+        h('span', { class: 'muted small' }, when.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))),
+      h('div', { class: 'history-what' },
+        h('span', {}, d.text), details,
+        c.author && h('span', { class: 'muted small' }, t('by {name}', { name: c.author }))),
+      undoBtn);
+  });
+  clear(list, rows.length ? rows : h('p', { class: 'muted' }, t('No changes yet.')),
+    commits.length >= historyPageNo * 30 ? h('button', { class: 'btn btn-quiet', onclick: () => { historyPageNo++; historyPage(); } }, t('Show older changes')) : null);
+}
+
+// =====================================================================
+// Backup and GEDCOM
+// =====================================================================
+
+const BACKUP_KEY = scopedKey('lastBackup');
+
+function download(parts, filename, type) {
+  const url = URL.createObjectURL(new Blob(parts, { type }));
+  const a = h('a', { href: url, download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 120_000);
+}
+
+function backupPage() {
+  const status = h('p', { class: 'upload-progress', role: 'status', 'aria-live': 'polite' });
+  const photoBytes = [...store.photos.values()].reduce((n, p) => n + (p.bytes || 0), 0);
+  const last = safeStorage.get('localStorage', BACKUP_KEY);
+  const busy = (on) => view.querySelectorAll('.backup-actions button').forEach((b) => { b.disabled = on; });
+
+  const runBackup = async (withPhotos) => {
+    if (store.pendingCount) { alert(t('Please Save & publish (or discard) your changes first.')); return; }
+    busy(true);
+    try {
+      const { parts, filename, counts } = await buildBackup(store, {
+        withPhotos,
+        onProgress: ({ step, done, total }) => clear(status, h('span', { class: 'spinner' }), ' ',
+          step === 'packing' ? t('Packing the ZIP file…') : t(step === 'people' ? 'Reading people: {done} of {total}' : 'Reading photos: {done} of {total}', { done, total })),
+      });
+      download(parts, filename, 'application/zip');
+      safeStorage.set('localStorage', BACKUP_KEY, new Date().toISOString());
+      clear(status, '✓ ', t('Backup ready: {people} people, {photos} photos. Check your Downloads folder.', { people: counts.people, photos: counts.images }));
+      renderBanners();
+    } catch (err) {
+      clear(status, h('span', { class: 'form-message' }, err.message));
+    } finally { busy(false); }
+  };
+
+  const exportGed = async () => {
+    busy(true);
+    try {
+      clear(status, h('span', { class: 'spinner' }), ' ', t('Preparing the GEDCOM file…'));
+      const { people } = await gatherPeople(store);
+      const { text, warnings } = exportGedcom({ people, rels: store.rels, places: store.places, moves: store.moves, title: store.config.siteTitle });
+      download([text], `family-archive-${new Date().toISOString().slice(0, 10)}.ged`, 'text/plain;charset=utf-8');
+      clear(status, '✓ ', t('GEDCOM file ready ({n} people).', { n: people.size }), warnings.length ? h('span', { class: 'muted small' }, ` ${warnings.join(' ')}`) : null);
+    } catch (err) {
+      clear(status, h('span', { class: 'form-message' }, err.message));
+    } finally { busy(false); }
+  };
+
+  const preview = h('div', {});
+  const gedInput = h('input', {
+    type: 'file', accept: '.ged,.GED,text/plain', hidden: true,
+    onchange: async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      let result;
+      try {
+        result = importGedcom(await file.text());
+      } catch (err) { alert(t('This file could not be read as GEDCOM: {msg}', { msg: err.message })); return; }
+      const dups = store.likelyDuplicates(result.people);
+      clear(preview, h('div', { class: 'panel batch-panel' },
+        h('h3', {}, t('Ready to import “{name}”', { name: file.name })),
+        h('p', {}, t('{p} people, {f} families, {l} places. Everyone is added as family-only; you can make people public afterwards.', { p: result.stats.people, f: result.stats.families, l: result.stats.places })),
+        dups.length ? h('div', { class: 'notice' }, h('p', {}, t('{n} of them look like people already in the archive (same name and birth year), e.g. {names}. Importing will create duplicates of them.', {
+          n: dups.length, names: dups.slice(0, 5).map((p) => displayName(p)).join(', '),
+        }))) : null,
+        result.warnings.length ? h('details', {}, h('summary', {}, t('{n} notes about the file', { n: result.warnings.length })), h('ul', {}, result.warnings.map((w) => h('li', { class: 'small' }, w)))) : null,
+        h('div', { class: 'actions' },
+          h('button', {
+            class: 'btn btn-primary', onclick: () => {
+              store.importBatch(result, `Imported from ${file.name}`);
+              changed();
+              clear(preview);
+              toast(t('Added. Look them over under People, then click "Save & publish".'), 'ok');
+            },
+          }, t('Add {n} people', { n: result.people.length })),
+          h('button', { class: 'btn btn-quiet', onclick: () => clear(preview) }, t('Cancel')))));
+    },
+  });
+
+  const repoZip = store.repo.owner ? `https://github.com/${store.repo.owner}/${store.repo.repo}/archive/refs/heads/${store.repo.branch}.zip` : null;
+  clear(view,
+    h('h1', {}, t('Backup')),
+    h('section', { class: 'panel' }, h('h2', {}, t('Download a full backup')),
+      h('p', {}, t('One ZIP file with everything in readable form: all people (including family-only information), family links, places, moves, photo details, a GEDCOM file and the photos.')),
+      h('p', { class: 'notice notice-warn' }, t('The backup is NOT encrypted. Keep it somewhere private, such as an external drive that stays at home.')),
+      h('div', { class: 'actions backup-actions' },
+        h('button', { class: 'btn btn-primary', onclick: () => runBackup(true) }, '⬇ ', t('With photos (about {size})', { size: formatBytes(photoBytes * 0.92 + 200_000) })),
+        h('button', { class: 'btn', onclick: () => runBackup(false) }, '⬇ ', t('Without photos (small)'))),
+      status,
+      h('p', { class: 'muted small' }, last ? t('Last backup on this device: {date}.', { date: new Date(last).toLocaleDateString() }) : t('No backup made on this device yet.'))),
+    h('section', { class: 'panel' }, h('h2', {}, t('Keep your originals safe')),
+      h('ul', {},
+        h('li', {}, t('The archive keeps smaller copies of photos. Keep the full-size originals and scans on an external drive AND in a cloud folder.')),
+        h('li', {}, t('Make a full backup a few times a year, and store it in a different place from the originals.')),
+        h('li', {}, t('Every change is also kept in the history on GitHub (see Recent changes).')),
+        repoZip ? h('li', {}, t('An exact copy of the archive as stored on GitHub (family data still encrypted): '), h('a', { href: repoZip }, t('download the repository ZIP'))) : null)),
+    h('section', { class: 'panel' }, h('h2', {}, t('GEDCOM (other genealogy programs)')),
+      h('p', {}, t('GEDCOM is the standard file that genealogy programs use to exchange family trees (Gramps, MyHeritage, Ancestry, RootsMagic, FamilySearch…).')),
+      h('div', { class: 'actions backup-actions' },
+        h('button', { class: 'btn', onclick: exportGed }, '⬇ ', t('Export GEDCOM file')),
+        h('button', { class: 'btn', onclick: () => gedInput.click() }, '⬆ ', t('Import a GEDCOM file…')),
+        gedInput),
+      h('p', { class: 'muted small' }, t('Photos are not part of GEDCOM files. Imported people come in as family-only and are added to your unsaved changes for you to review first.')),
+      preview));
+}
+
+// =====================================================================
 // Settings
 // =====================================================================
 
@@ -1655,6 +1855,10 @@ function helpPage() {
       h('p', {}, t('Go to Photos, drag pictures onto the dotted box, then click "Save & publish". Up to about 40 at a time works best. Click a photo to give it a title and date, and click on faces to tag people. Photos showing living or family-only people always stay family-only.'))),
     item(t('Places and moves'),
       h('p', {}, t('Save each town once under Places (search the world map to put it on the map), with its older names and countries over time. Then pick it in any place box. Under Moves, record who moved from where to where, when and why; moves draw the arrows on the website’s map.'))),
+    item(t('Undoing a mistake'),
+      h('p', {}, t('Open History, find the change and click Undo. Only what that change altered is put back; anything changed again since is left alone and listed. An undo is itself a change, so it can be undone too.'))),
+    item(t('Backups and other genealogy programs'),
+      h('p', {}, t('Backup → "With photos" downloads everything in readable form (people, family links, places, moves, photos and a GEDCOM file). Keep it somewhere private. GEDCOM export/import lets you exchange the tree with programs like Gramps, MyHeritage or Ancestry.'))),
     item(t('Running out of space'),
       h('p', {}, t('GitHub suggests keeping the archive under about 1 GB. Old versions of changed files are kept forever in the history, so replacing big files uses extra space. Keep your full-resolution originals elsewhere (an external drive and a cloud folder); the archive keeps smaller copies.'))),
     item(t('My token expired or stopped working'),
