@@ -27,14 +27,16 @@
    "type": "about",
    "date": "1880"
   },
-  "place": "Kars"
+  "place": "Kars",
+  "placeId": "lsamplekars"
  },
  "death": {
   "date": {
    "type": "exact",
    "date": "1951-03-12"
   },
-  "place": "Yerevan"
+  "place": "Yerevan",
+  "placeId": "lsampleyerevan"
  },
  "occupation": "Blacksmith",
  "languages": [
@@ -47,19 +49,6 @@
   {
    "title": "The iron gate",
    "text": "A made-up story: he once forged a gate that is said to still stand."
-  }
- ],
- "events": [
-  {
-   "id": "e1",
-   "type": "move",
-   "date": {
-    "type": "between",
-    "from": "1917",
-    "to": "1919"
-   },
-   "place": "Yerevan",
-   "description": "Left Kars with the family (sample event)."
   }
  ],
  "sources": [

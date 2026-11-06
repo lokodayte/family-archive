@@ -6,7 +6,7 @@ import {
 import { sampleRels } from '../tools/sampleFamily.js';
 import { layoutTree } from '../site/assets/js/lib/treeLayout.js';
 import { buildTimeline, lifespan } from '../site/assets/js/lib/timeline.js';
-import { samplePeople } from '../tools/sampleFamily.js';
+import { samplePeople, sampleMoves } from '../tools/sampleFamily.js';
 import { summarize } from '../site/assets/js/lib/model.js';
 
 const P = (n) => `psample${String(n).padStart(4, '0')}`;
@@ -85,8 +85,11 @@ test('tree layout: hourglass with the chosen person in the middle', () => {
 test('timeline puts birth, marriages, children and death in order', () => {
   const people = new Map(samplePeople().map((p) => [p.id, summarize(p)]));
   const hov = samplePeople()[0];
-  const items = buildTimeline(hov, { graph: g, people });
-  assert.deepEqual(items.map((i) => i.type), ['birth', 'marriage', 'child', 'marriage', 'move', 'child', 'death']);
+  const items = buildTimeline(hov, { graph: g, people, moves: sampleMoves() });
+  assert.deepEqual(items.map((i) => i.type), ['birth', 'marriage', 'child', 'marriage', 'migration', 'child', 'death']);
+  const mig = items.find((i) => i.type === 'migration');
+  assert.equal(mig.from, 'lsamplekars');
+  assert.deepEqual(mig.with, ['psample0003', 'psample0004']);
   assert.equal(lifespan(summarize(hov)), 'c. 1880 – 1951');
   assert.equal(lifespan(people.get(P(8))), 'b. 1945');
 });

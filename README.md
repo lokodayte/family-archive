@@ -17,6 +17,7 @@ You manage everything from the admin panel in your browser. You never need to ed
 4. [Family links: parents, spouses, children](#family-links)
 5. [Dates that aren't exact](#dates)
    - [Photos and scanned documents](#photos)
+   - [Places, moves and the map](#places)
 6. [Public or family-only?](#privacy)
 7. [Saving and publishing](#saving)
 8. [Changing the family password](#password)
@@ -59,11 +60,11 @@ The admin panel needs a key from GitHub, called a *token*, that allows it to sav
 
 ### b) Replace the sample family
 
-The archive starts with a **made-up sample family** (the "Sampleyans") and four fake sample photos, so you can try things out. The sample family password is in the setup message you received.
+The archive starts with a **made-up sample family** (the "Sampleyans"), four fake sample photos, and sample places and moves, so you can try things out. The sample family password is in the setup message you received.
 
 When you're ready to add real people:
 1. In the admin panel, go to **Settings → Family password**. Set your own family password and tick **Full re-lock**. This is cheap now because there's almost nothing stored yet.
-2. Delete the sample people and sample photos: open each one, click **Delete**, then **Save & publish**.
+2. Delete the sample people, photos, moves and places: open each one, click **Delete**, then **Save & publish**. (Delete moves before places.)
 3. In **Settings**, set the **Archive title** and your **email for corrections**.
 
 <a id="adding-a-person"></a>
@@ -140,6 +141,33 @@ Click a photo in **Photos** to open it:
 - Click a photo to see it large, with names on the faces, its story and the people in it. ← → keys move between photos.
 - Each profile shows the person's photo and all the photos they're tagged in.
 
+<a id="places"></a>
+## 5c. Places, moves and the map
+
+### Places: saved once, used everywhere
+Every town or village is saved **once** (admin → **Places**) and then picked wherever a place is needed: birth, death, marriage, life events, photos, moves.
+- **Add a place:** **Places → + Add a place**, then type the name in **Search the world map** and pick the right result. The pin, name and country are filled in for you. You can drag the pin, or click the map, for villages that no longer exist.
+- **Older names:** for example Gyumri was *Alexandropol* (until 1923) and *Leninakan* (1924–1990). Add these with their years, and the site shows the right name for each date.
+- **Country over time:** for example *Russian Empire (to 1917)*, *First Republic of Armenia (1918–1920)*, *Soviet Union (1921–1991)*, *Armenia (from 1992)*. Leave "to" empty for today.
+- **Picking a place on a form:** start typing (old names work too) and choose it from the list. If it isn't saved yet, choose **Save "…" as a new place** and add its map location later. The Places page lists places that still need one. You can also keep plain text, but plain-text places don't appear on the map.
+
+### Moves (migrations)
+Admin → **Moves → + Add a move** (or **+ Add a move for this person** on someone's page):
+- **Who moved:** add everyone who travelled together.
+- **From / To / When / Why:** war, work, marriage, study, forced displacement, refugees, and so on.
+- **The story:** how they travelled, what they took, who helped.
+
+A move is public only if everyone in it is public, and the same goes for places. A place only becomes public if something public needs it.
+
+### The map (on the website)
+- **Journeys:** each move is an arrow, coloured by **family branch** (the person's birth surname). Click an arrow for the story, or a place for everyone connected to it.
+- **Where everyone lived:** move the year slider, or press **▶ Play**, to see where everyone was in that year. Click a circle to see who was there and how old they were.
+- **Show:** follow one person's journeys.
+- Every place has its own page: its old names and countries, everyone born, married, living or dying there, and photos taken there.
+- Profiles now show historical names, for example *born in Kars, Russian Empire*, and moves appear in the life timeline.
+
+The background map comes from **OpenStreetMap** (free, no account). Viewing the map loads map tiles from OpenStreetMap's servers, as any online map does.
+
 <a id="privacy"></a>
 ## 6. Public or family-only?
 
@@ -207,7 +235,6 @@ Practice mode works like the real admin panel but never sends anything to GitHub
 <a id="coming-next"></a>
 ## 12. What's coming next
 
-- **Phase 3:** places with historical names, migrations, a map with family journeys, and a timeline slider.
 - **Phase 4:** a recent-changes page with undo, a full backup ZIP, GEDCOM import and export, a fuller tree, "How are we related?", and more mobile polish.
 
 ---

@@ -6,7 +6,9 @@ export function decadeOf(date) {
   return y == null ? null : Math.floor(y / 10) * 10;
 }
 
-const placeKey = (p) => String(p || '').trim().toLowerCase();
+const textKey = (p) => String(p || '').trim().toLowerCase();
+/** Photos linked to a saved place are grouped by that place; others by their text. */
+export const placeKeyOf = (photo) => (photo.placeId ? `id:${photo.placeId}` : photo.place ? `t:${textKey(photo.place)}` : '');
 
 /** Oldest first; undated photos at the end. */
 export function sortPhotos(photos) {
@@ -20,7 +22,10 @@ export function filterPhotos(photos, filters = {}) {
   const { person, place, decade, kind } = filters;
   return sortPhotos([...photos].filter((p) => {
     if (person && !p.tags?.some((t) => t.person === person)) return false;
-    if (place && placeKey(p.place) !== placeKey(place)) return false;
+    if (place) {
+      const key = placeKeyOf(p);
+      if (/^(id|t):/.test(place) ? key !== place : textKey(p.place) !== textKey(place)) return false;
+    }
     if (kind && (p.kind || 'photo') !== kind) return false;
     if (decade === 'undated') return decadeOf(p.date) == null;
     if (decade != null && decade !== '' && decadeOf(p.date) !== Number(decade)) return false;
@@ -29,15 +34,15 @@ export function filterPhotos(photos, filters = {}) {
 }
 
 /** The choices to show in the filter menus, with counts. */
-export function galleryFacets(photos) {
+export function galleryFacets(photos, { placeName = () => '' } = {}) {
   const places = new Map();
   const decades = new Map();
   const people = new Map();
   let undated = 0;
   for (const p of photos) {
-    if (p.place) {
-      const k = placeKey(p.place);
-      const cur = places.get(k) || { label: p.place.trim(), count: 0 };
+    const k = placeKeyOf(p);
+    if (k) {
+      const cur = places.get(k) || { key: k, label: (p.placeId && placeName(p.placeId)) || String(p.place || '').trim(), count: 0 };
       cur.count++;
       places.set(k, cur);
     }

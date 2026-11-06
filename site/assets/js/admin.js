@@ -13,7 +13,11 @@ import {
 import { processImage, rotateImage, formatBytes, ACCEPTED } from './lib/images.js';
 import { lazyImage, BlobCache, tagLayer, clickPosition } from './lib/media.js';
 import { sortPhotos } from './lib/gallery.js';
-import { parseDate, formatDate, DATE_HELP } from './lib/dates.js';
+import {
+  searchPlaces, placeText, placeLabel, hasCoords, allPlaceNames, countryAt, MOVE_REASONS,
+} from './lib/places.js';
+import { loadLeaflet, baseTiles, geocode } from './lib/leaflet.js';
+import { parseDate, formatDate, DATE_HELP, sortKey as sortKeyOf } from './lib/dates.js';
 import { PARENT_KINDS } from './lib/relations.js';
 import { lifespan, EVENT_TYPES } from './lib/timeline.js';
 
@@ -337,7 +341,9 @@ function renderBanners() {
 // =====================================================================
 
 async function route() {
-  const [, page, id] = (location.hash || '#/people').split('/');
+  const [path, query = ''] = (location.hash || '#/people').split('?');
+  const [, page, id] = path.split('/');
+  const params = new URLSearchParams(query);
   if (editorDirty && `${page}/${id}` !== currentEditRoute) {
     if (!confirm(t('Leave without keeping your edits?'))) {
       history.replaceState(null, '', `#/${currentEditRoute}`);
@@ -345,11 +351,15 @@ async function route() {
     }
     editorDirty = false;
   }
-  const section = { person: 'people', new: 'people', photo: 'photos' }[page] || page || 'people';
+  const section = { person: 'people', new: 'people', photo: 'photos', place: 'places', move: 'moves' }[page] || page || 'people';
   document.querySelectorAll('#admin-nav a[data-page]').forEach((a) => a.classList.toggle('active', a.dataset.page === section));
   if (page === 'person' && id) await editorPage(decodeURIComponent(id));
   else if (page === 'photos') photosPage();
   else if (page === 'photo' && id) await photoEditorPage(decodeURIComponent(id));
+  else if (page === 'places') placesPage();
+  else if (page === 'place' && id) await placeEditorPage(decodeURIComponent(id));
+  else if (page === 'moves') movesPage();
+  else if (page === 'move' && id) moveEditorPage(decodeURIComponent(id), params);
   else if (page === 'new') await editorPage(null);
   else if (page === 'settings') settingsPage();
   else if (page === 'help') helpPage();
@@ -510,7 +520,93 @@ function fieldKit(touch) {
   const listField = (label, get, set, hint) => text(label, () => (get() || []).join(', '),
     (v) => set(v.split(',').map((x) => x.trim()).filter(Boolean)), { hint });
 
-  return { text, select, dateField, listField };
+  /**
+   * A place: pick a saved place (searchable by old names too), save a new one, or keep plain text.
+   * obj gets { place: text, placeId } (or, with idKey and no textKey, only an id).
+   */
+  const placeField = (label, obj, { idKey = 'placeId', textKey = 'place', requireSaved = false, hint } = {}) => {
+    const current = () => {
+      const saved = obj[idKey] && store.places.get(obj[idKey]);
+      return saved ? saved.name : (textKey ? obj[textKey] || '' : '');
+    };
+    const input = h('input', { type: 'text', value: current(), autocomplete: 'off', placeholder: t('Start typing a town or village…') });
+    const list = h('ul', { class: 'picker-list', role: 'listbox', hidden: true });
+    const status = h('small', { class: 'place-status' });
+    let items = [];
+    let active = 0;
+    const showStatus = () => {
+      const saved = obj[idKey] && store.places.get(obj[idKey]);
+      if (saved) {
+        const c = countryAt(saved);
+        status.className = 'place-status ok';
+        status.textContent = `📍 ${[saved.name, c].filter(Boolean).join(', ')} — ${hasCoords(saved) ? t('saved place, shown on the map') : t('saved place without a map location yet (add it under Places)')}`;
+      } else if (textKey && obj[textKey]) {
+        status.className = 'place-status';
+        status.textContent = t('Plain text only. Pick or save it as a place to show it on the map.');
+      } else {
+        status.className = 'place-status';
+        status.textContent = requireSaved ? t('Choose a saved place, or type a name and save it as a new place.') : '';
+      }
+    };
+    const link = (id) => {
+      const pl = store.places.get(id);
+      obj[idKey] = id;
+      if (textKey) obj[textKey] = pl.name;
+      input.value = pl.name;
+      list.hidden = true;
+      touch();
+      showStatus();
+    };
+    const choose = (i) => items[i]?.action();
+    const render = () => {
+      const q = input.value.trim();
+      if (!q) { list.hidden = true; return; }
+      const found = searchPlaces(store.places, q, 6);
+      items = found.map((pl) => {
+        const older = allPlaceNames(pl).filter((n) => n !== pl.name);
+        return {
+          label: [h('strong', {}, pl.name), h('span', { class: 'muted small' },
+            [older.length ? ` (${older.join(', ')})` : '', countryAt(pl) ? ` · ${countryAt(pl)}` : '', hasCoords(pl) ? '' : ` · ${t('no map location')}`].join(''))],
+          action: () => link(pl.id),
+        };
+      });
+      if (!found.some((pl) => allPlaceNames(pl).some((n) => n.toLowerCase() === q.toLowerCase()))) {
+        items.push({
+          label: [h('strong', {}, '+ '), t('Save “{q}” as a new place', { q })],
+          action: () => { const id = store.savePlace({ name: q }); changed(); link(id); toast(t('Place saved. Add its map location later under Places.')); },
+        });
+      }
+      if (textKey && !requireSaved) {
+        items.push({ label: [h('strong', {}, '✎ '), t('Keep “{q}” as plain text', { q })], action: () => { list.hidden = true; } });
+      }
+      active = 0;
+      clear(list, items.map((it, i) => h('li', {
+        role: 'option', class: i === active ? 'active' : '',
+        onmousedown: (e) => { e.preventDefault(); choose(i); },
+      }, it.label)));
+      list.hidden = false;
+    };
+    input.addEventListener('input', () => {
+      delete obj[idKey];
+      if (textKey) obj[textKey] = input.value;
+      touch();
+      showStatus();
+      render();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (list.hidden) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        active = (active + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        [...list.children].forEach((li, i) => li.classList.toggle('active', i === active));
+      } else if (e.key === 'Enter') { e.preventDefault(); choose(active); } else if (e.key === 'Escape') list.hidden = true;
+    });
+    input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 150));
+    showStatus();
+    return h('label', { class: 'field' }, h('span', {}, label), h('div', { class: 'picker' }, input, list), status, hint && h('small', { class: 'muted' }, hint));
+  };
+
+  return { text, select, dateField, listField, placeField };
 }
 
 async function editorPage(id) {
@@ -541,7 +637,7 @@ async function editorPage(id) {
   const lookup = (pid) => store.people.get(pid) || summarize(newPeople.find((p) => p.id === pid) || { id: pid });
   const nameOf = (pid) => displayName(lookup(pid));
 
-  const { text, select, dateField, listField } = fieldKit(touch);
+  const { text, select, dateField, listField, placeField } = fieldKit(touch);
 
   /** A list of repeatable blocks (stories, events, sources). */
   const repeatable = (title, arr, makeItem, renderItem, addLabel) => {
@@ -582,7 +678,7 @@ async function editorPage(id) {
       person.living && h('p', { class: 'muted small' }, t('Living people are always family-only, to protect their privacy.'))));
   const drawDeath = () => clear(deathBox, person.living ? null : h('div', { class: 'grid-2' },
     dateField(t('Date of death'), () => person.death.date, (v) => { person.death.date = v; }),
-    text(t('Place of death'), () => person.death.place, (v) => { person.death.place = v; }, { placeholder: t('Town, country') })));
+    placeField(t('Place of death'), person.death)));
   drawPrivacy();
   drawDeath();
 
@@ -648,7 +744,7 @@ async function editorPage(id) {
       h('h3', {}, t('Spouses and partners')),
       spouses.map((r) => relRow(r, r.a === person.id ? r.b : r.a, h('div', { class: 'grid-2 spouse-extra' },
         dateField(t('Married'), () => r.start, (v) => { r.start = v; }),
-        text(t('Place of marriage'), () => r.place, (v) => { r.place = v; }),
+        placeField(t('Place of marriage'), r),
         dateField(t('Ended'), () => r.end, (v) => { r.end = v; }),
         select(t('How it ended'), { '': t('—'), death: t('death of a spouse'), divorce: t('divorce'), separation: t('separation') }, () => r.endReason, (v) => { r.endReason = v; })))),
       personPicker({ label: t('Add a spouse or partner'), excludeIds: [person.id], extraPeople: extra, onPick: addRelative('spouse') }),
@@ -669,7 +765,7 @@ async function editorPage(id) {
     problems.push(...store.checkEdit(person, draftRels));
     if (problems.length) { formMsg.textContent = problems.join(' '); formMsg.scrollIntoView({ block: 'center', behavior: 'smooth' }); return; }
     // Drop empty spouse dates etc. so files stay tidy.
-    for (const r of draftRels) for (const k of ['start', 'end', 'place', 'endReason']) if (!r[k]) delete r[k];
+    for (const r of draftRels) for (const k of ['start', 'end', 'place', 'placeId', 'endReason']) if (!r[k]) delete r[k];
     store.applyPersonEdit(person, draftRels, newPeople);
     editorDirty = false;
     changed();
@@ -713,10 +809,11 @@ async function editorPage(id) {
       h('p', { class: 'muted small' }, DATE_HELP),
       h('div', { class: 'grid-2' },
         dateField(t('Date of birth'), () => person.birth.date, (v) => { person.birth.date = v; }),
-        text(t('Place of birth'), () => person.birth.place, (v) => { person.birth.place = v; }, { placeholder: t('Town, country') })),
+        placeField(t('Place of birth'), person.birth)),
       deathBox),
     portraitSection(person, touch),
     h('section', { class: 'panel' }, h('h2', {}, t('Family links')), relBox, relProblems),
+    personMovesSection(person, isNew),
     h('section', { class: 'panel' }, h('h2', {}, t('Life')),
       h('div', { class: 'grid-2' },
         text(t('Occupation'), () => person.occupation, (v) => { person.occupation = v; }),
@@ -729,7 +826,7 @@ async function editorPage(id) {
     repeatable(t('Life events'), person.events, () => ({ id: newId('e'), type: 'residence' }), (ev) => h('div', { class: 'grid-2' },
       select(t('What happened'), Object.fromEntries(Object.entries(EVENT_TYPES).map(([k, v]) => [k, t(v)])), () => ev.type, (v) => { ev.type = v; }),
       dateField(t('When'), () => ev.date, (v) => { ev.date = v; }),
-      text(t('Where'), () => ev.place, (v) => { ev.place = v; }),
+      placeField(t('Where'), ev),
       text(t('Details'), () => ev.description, (v) => { ev.description = v; })), t('Add an event')),
     h('p', { class: 'muted small events-note' }, t('Birth, marriages, children and death are added to the timeline automatically.')),
     repeatable(t('Sources'), person.sources, () => ({ id: newId('s'), type: 'memory', confidence: 'medium' }), (src) => h('div', { class: 'grid-2' },
@@ -775,7 +872,7 @@ function photoCard(ph) {
     h('span', { class: 'photo-thumb' }, lazyImage(() => adminImageURL(ph.id, 'thumb'), { alt: photoTitle(ph) })),
     h('span', { class: 'photo-card-text' },
       h('span', { class: 'photo-card-title' }, photoTitle(ph)),
-      h('span', { class: 'muted small' }, [formatDate(ph.date), ph.place].filter(Boolean).join(' · ') || ' '),
+      h('span', { class: 'muted small' }, [formatDate(ph.date), placeText(ph, store.places, ph.date)].filter(Boolean).join(' · ') || ' '),
       h('span', { class: 'badges' },
         h('span', { class: `badge ${ph.privacy === 'public' ? 'badge-public' : 'badge-family'}` }, ph.privacy === 'public' ? t('Public') : t('Family')),
         ph.kind === 'document' && h('span', { class: 'badge' }, t('Document')),
@@ -843,7 +940,7 @@ function photosPage() {
       h('p', { class: 'muted small' }, t('Leave a box empty to keep each photo as it is. You can change each one separately afterwards.')),
       h('div', { class: 'grid-2' },
         fields.dateField(t('Approximate date'), () => shared.date, (v) => { shared.date = v; }),
-        fields.text(t('Place'), () => shared.place, (v) => { shared.place = v; }, { placeholder: t('Town, country') })),
+        fields.placeField(t('Place'), shared)),
       privacyChoice('batch-privacy', () => shared.choice, (v) => { shared.choice = v; }),
       h('div', { class: 'actions' },
         h('button', {
@@ -853,7 +950,10 @@ function photosPage() {
               const details = await store.getPhotoDetails(id);
               const cur = { ...store.photos.get(id), ...details, choice: shared.choice };
               if (shared.date) cur.date = shared.date;
-              if (shared.place.trim()) cur.place = shared.place.trim();
+              if (shared.place?.trim()) {
+                cur.place = shared.place.trim();
+                if (shared.placeId) cur.placeId = shared.placeId; else delete cur.placeId;
+              }
               store.updatePhoto(cur);
             }
             lastBatch = [];
@@ -944,7 +1044,7 @@ async function photoEditorPage(id) {
   currentEditRoute = `photo/${id}`;
   editorDirty = false;
   const touch = () => { editorDirty = true; };
-  const { text, select, dateField } = fieldKit(touch);
+  const { text, select, dateField, placeField } = fieldKit(touch);
   const isSaved = store.prevPhotos.has(id);
 
   // ----- image with name tags -----
@@ -1100,7 +1200,7 @@ async function photoEditorPage(id) {
           select(t('Kind'), Object.fromEntries(Object.entries(PHOTO_KINDS).map(([k, v]) => [k, t(v)])), () => draft.kind || 'photo', (v) => { draft.kind = v; }),
           h('div', { class: 'grid-2' },
             dateField(t('Approximate date'), () => draft.date, (v) => { draft.date = v; }),
-            text(t('Place'), () => draft.place, (v) => { draft.place = v; }, { placeholder: t('Town, country') })),
+            placeField(t('Place'), draft)),
           text(t('Description'), () => draft.description, (v) => { draft.description = v; }, { multiline: true, rows: 3, placeholder: t('Who, what, where — what you see in the picture') }),
           text(t('The story behind it'), () => draft.story, (v) => { draft.story = v; }, { multiline: true, rows: 6 })),
         h('section', { class: 'panel' }, h('h2', {}, t('Privacy')),
@@ -1138,6 +1238,325 @@ function portraitSection(person, touch) {
     photos.length
       ? [h('p', { class: 'muted small' }, t('Photos this person is tagged in. Choose one as their profile photo:')), box]
       : h('p', { class: 'muted' }, t('No photos of this person yet. In '), h('a', { href: '#/photos' }, t('Photos')), t(', open a photo and click on their face to tag them.')));
+}
+
+// =====================================================================
+// Places
+// =====================================================================
+
+let placeQuery = '';
+let placeFilter = 'all';
+
+function placesPage() {
+  const list = h('div', { class: 'admin-list' });
+  const usageCount = (id) => {
+    const u = store.placeUsage(id);
+    return u.people.length + u.moves.length + u.photos.length + u.rels.length;
+  };
+  const filters = {
+    all: [t('All'), () => true],
+    nomap: [t('No map location'), (pl) => !hasCoords(pl)],
+    unused: [t('Not used'), (pl) => usageCount(pl.id) === 0],
+  };
+  const draw = () => {
+    const all = [...store.places.values()];
+    const items = (placeQuery.trim() ? searchPlaces(all, placeQuery, 1000) : all.sort((a, b) => a.name.localeCompare(b.name)))
+      .filter(filters[placeFilter][1]);
+    clear(list, items.length ? items.map((pl) => {
+      const n = usageCount(pl.id);
+      const older = allPlaceNames(pl).filter((x) => x !== pl.name);
+      return h('a', { class: 'admin-row', href: `#/place/${pl.id}` },
+        h('span', { class: 'place-pin', 'aria-hidden': 'true' }, hasCoords(pl) ? '📍' : '❔'),
+        h('span', { class: 'admin-row-main' },
+          h('strong', {}, pl.name, older.length ? h('span', { class: 'muted' }, ` (${older.join(', ')})`) : null),
+          h('span', { class: 'muted small' }, [countryAt(pl), t(n === 1 ? 'used once' : 'used {n} times', { n })].filter(Boolean).join(' · '))),
+        h('span', { class: 'badges' },
+          !hasCoords(pl) && h('span', { class: 'badge badge-unsaved' }, t('No map location'))));
+    }) : h('p', { class: 'muted' }, all.length ? t('No places match.') : t('No places yet.')));
+  };
+  draw();
+  const missing = [...store.places.values()].filter((pl) => !hasCoords(pl)).length;
+  clear(view,
+    h('div', { class: 'admin-title' }, h('h1', {}, t('Places')),
+      h('a', { class: 'btn btn-primary', href: '#/place/new' }, '+ ', t('Add a place'))),
+    h('p', { class: 'muted' }, t('Each town or village is saved once and reused everywhere: births, deaths, moves, photos. A place can have older names and belong to different countries over time.')),
+    missing ? h('div', { class: 'notice' }, h('p', {}, t('{n} place(s) have no map location yet, so they can’t appear on the map. Open them to add one.', { n: missing }))) : null,
+    h('input', {
+      type: 'search', class: 'search-input', placeholder: t('Find a place (old names work too)…'), value: placeQuery,
+      oninput: debounce((e) => { placeQuery = e.target.value; draw(); }, 80),
+    }),
+    h('div', { class: 'filter-chips' }, Object.entries(filters).map(([k, [label]]) => h('button', {
+      class: `chip-btn${placeFilter === k ? ' on' : ''}`, onclick: () => { placeFilter = k; placesPage(); },
+    }, label))),
+    list);
+}
+
+async function placeEditorPage(id) {
+  const isNew = id === 'new' || !store.places.has(id);
+  if (!isNew && !store.places.has(id)) { clear(view, h('h1', {}, t('Place not found'))); return; }
+  const draft = isNew ? { name: '', names: [], countries: [] } : structuredClone(store.places.get(id));
+  draft.names ||= [];
+  draft.countries ||= [];
+  currentEditRoute = `place/${id}`;
+  editorDirty = false;
+  const touch = () => { editorDirty = true; };
+  const { text } = fieldKit(touch);
+  const msg = h('p', { class: 'form-message', role: 'alert' });
+
+  // ----- map: search, click or drag to set the location -----
+  const mapBox = h('div', { class: 'place-map' });
+  const coordText = h('p', { class: 'muted small' });
+  const results = h('div', { class: 'geo-results' });
+  const search = h('input', { type: 'search', placeholder: t('Search the world map, e.g. “Kars, Turkey”'), value: draft.name || '' });
+  let map;
+  let marker;
+  const showCoords = () => {
+    coordText.textContent = hasCoords(draft)
+      ? t('Map location: {lat}, {lng}. Drag the pin or click the map to adjust.', { lat: draft.lat.toFixed(4), lng: draft.lng.toFixed(4) })
+      : t('No map location yet. Search above, or click on the map.');
+  };
+  const setPoint = (lat, lng, zoom) => {
+    draft.lat = lat; draft.lng = lng;
+    touch();
+    if (marker) marker.setLatLng([lat, lng]);
+    else {
+      marker = globalThis.L.marker([lat, lng], { draggable: true }).addTo(map);
+      marker.on('dragend', () => { const ll = marker.getLatLng(); draft.lat = ll.lat; draft.lng = ll.lng; touch(); showCoords(); });
+    }
+    if (zoom) map.setView([lat, lng], zoom);
+    showCoords();
+  };
+  const runSearch = async () => {
+    const q = search.value.trim();
+    if (!q) return;
+    clear(results, h('p', { class: 'muted small' }, t('Searching…')));
+    try {
+      const found = await geocode(q);
+      clear(results, found.length ? found.map((r) => h('button', {
+        type: 'button', class: 'geo-result',
+        onclick: () => {
+          setPoint(r.lat, r.lng, 11);
+          if (!draft.name.trim()) { draft.name = r.name; nameInput.value = r.name; }
+          if (r.country && !draft.countries.length) { draft.countries.push({ country: r.country }); drawCountries(); }
+          clear(results);
+        },
+      }, r.label)) : h('p', { class: 'muted small' }, t('Nothing found. Try another spelling, or click on the map.')));
+    } catch (err) {
+      clear(results, h('p', { class: 'form-message' }, err.message));
+    }
+  };
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runSearch(); } });
+
+  // ----- older names and countries over time -----
+  const yearInput = (obj, key, placeholder) => h('input', {
+    type: 'number', inputmode: 'numeric', min: '100', max: '2200', placeholder, value: obj[key] ?? '', class: 'year-input',
+    oninput: (e) => { const v = parseInt(e.target.value, 10); if (Number.isFinite(v)) obj[key] = v; else delete obj[key]; touch(); },
+  });
+  const periodRows = (arr, key, label, ph) => {
+    const box = h('div', { class: 'period-rows' });
+    const draw = () => clear(box,
+      arr.map((row, i) => h('div', { class: 'period-row' },
+        h('input', { type: 'text', value: row[key] || '', placeholder: ph, 'aria-label': label, oninput: (e) => { row[key] = e.target.value; touch(); } }),
+        h('span', { class: 'muted small' }, t('from')), yearInput(row, 'from', t('year')),
+        h('span', { class: 'muted small' }, t('to')), yearInput(row, 'to', t('year')),
+        h('button', { type: 'button', class: 'btn btn-quiet btn-small', 'aria-label': t('Remove'), onclick: () => { arr.splice(i, 1); touch(); draw(); } }, '✕'))),
+      h('button', { type: 'button', class: 'btn btn-quiet btn-small', onclick: () => { arr.push({}); touch(); draw(); } }, '+ ', t('Add')));
+    draw();
+    return { box, draw };
+  };
+  const namesRows = periodRows(draft.names, 'name', t('Older name'), t('e.g. Alexandropol'));
+  const countryRows = periodRows(draft.countries, 'country', t('Country'), t('e.g. Russian Empire'));
+  const drawCountries = countryRows.draw;
+  const nameInput = h('input', { type: 'text', value: draft.name, placeholder: t('Today’s name, e.g. Gyumri'), oninput: (e) => { draft.name = e.target.value; touch(); } });
+
+  const usage = isNew ? null : store.placeUsage(id);
+  const keep = () => {
+    if (!draft.name.trim()) { msg.textContent = t('Please give the place a name.'); return; }
+    draft.names = draft.names.filter((n) => n.name?.trim());
+    draft.countries = draft.countries.filter((c) => c.country?.trim());
+    const savedId = store.savePlace(isNew ? { ...draft, id: undefined } : draft);
+    editorDirty = false;
+    changed();
+    toast(t('Kept. Click "Save & publish" when you are ready.'), 'ok');
+    location.hash = '#/places';
+    return savedId;
+  };
+  const remove = () => {
+    try {
+      const n = usage.people.length + usage.photos.length + usage.rels.length;
+      if (!confirm(n
+        ? t('Delete this place? {n} people/photos mention it; they will keep the name as plain text and disappear from the map.', { n })
+        : t('Delete this place?'))) return;
+      store.deletePlace(id);
+      editorDirty = false;
+      changed();
+      location.hash = '#/places';
+    } catch (err) { msg.textContent = err.message; }
+  };
+
+  clear(view,
+    h('nav', { class: 'crumbs' }, h('a', { href: '#/places' }, t('Places')), ' / ', isNew ? t('New place') : draft.name),
+    h('h1', {}, isNew ? t('Add a place') : draft.name),
+    h('section', { class: 'panel' }, h('h2', {}, t('Name')),
+      h('label', { class: 'field' }, h('span', {}, t('Name used today')), nameInput)),
+    h('section', { class: 'panel' }, h('h2', {}, t('Where is it?')),
+      h('div', { class: 'geo-search' }, search, h('button', { type: 'button', class: 'btn', onclick: runSearch }, t('Search'))),
+      results, mapBox, coordText,
+      h('p', { class: 'muted small' }, t('Search uses OpenStreetMap. For villages that no longer exist, zoom in and click roughly where it was.'))),
+    h('section', { class: 'panel' }, h('h2', {}, t('Older names')),
+      h('p', { class: 'muted small' }, t('Names it had in the past, with the years they were used (leave a year empty if unsure). The site shows the right name for each date.')),
+      namesRows.box),
+    h('section', { class: 'panel' }, h('h2', {}, t('Country over time')),
+      h('p', { class: 'muted small' }, t('Which country (or empire) it belonged to, and when. Leave "to" empty for today.')),
+      countryRows.box),
+    h('section', { class: 'panel' }, h('h2', {}, t('Notes')),
+      text(t('Notes about this place'), () => draft.note, (v) => { draft.note = v; }, { multiline: true, rows: 3 })),
+    usage && h('section', { class: 'panel' }, h('h2', {}, t('Used by')),
+      h('p', {}, t('{p} people, {m} moves, {f} photos, {r} marriages', { p: usage.people.length, m: usage.moves.length, f: usage.photos.length, r: usage.rels.length }))),
+    h('div', { class: 'editor-actions' }, msg,
+      h('div', { class: 'actions' },
+        h('button', { type: 'button', class: 'btn btn-primary', onclick: keep }, t('Keep these changes')),
+        h('button', { type: 'button', class: 'btn btn-quiet', onclick: () => { if (!editorDirty || confirm(t('Throw away your edits?'))) { editorDirty = false; location.hash = '#/places'; } } }, t('Cancel')),
+        !isNew && h('button', { type: 'button', class: 'btn btn-danger', onclick: remove }, t('Delete place')))));
+  showCoords();
+
+  try {
+    const L = await loadLeaflet('../');
+    map = L.map(mapBox, { worldCopyJump: true }).setView(hasCoords(draft) ? [draft.lat, draft.lng] : [41, 42], hasCoords(draft) ? 10 : 4);
+    baseTiles(L).addTo(map);
+    for (const pl of store.places.values()) {
+      if (pl.id !== draft.id && hasCoords(pl)) L.circleMarker([pl.lat, pl.lng], { radius: 4, color: '#8d969a', weight: 1, fillOpacity: 0.5 }).bindTooltip(pl.name).addTo(map);
+    }
+    if (hasCoords(draft)) setPoint(draft.lat, draft.lng);
+    editorDirty = false;
+    map.on('click', (e) => setPoint(e.latlng.lat, e.latlng.lng));
+  } catch (err) {
+    clear(mapBox, h('p', { class: 'form-message' }, err.message));
+  }
+}
+
+// =====================================================================
+// Moves (migrations)
+// =====================================================================
+
+let moveQuery = '';
+
+function moveSummary(m) {
+  const names = m.people.map(personName).join(', ');
+  const from = m.from ? placeText({ placeId: m.from }, store.places, m.date) : '?';
+  const to = m.to ? placeText({ placeId: m.to }, store.places, m.date) : '?';
+  return { names, route: `${from} → ${to}` };
+}
+
+function movesPage() {
+  const list = h('div', { class: 'admin-list' });
+  const draw = () => {
+    const q = normalizeText(moveQuery).trim();
+    const all = [...store.moves.values()].sort((a, b) => (sortKeyOf(a.date) ?? 1e9) - (sortKeyOf(b.date) ?? 1e9));
+    const items = all.filter((m) => {
+      if (!q) return true;
+      const { names, route } = moveSummary(m);
+      return normalizeText(`${names} ${route} ${formatDate(m.date)}`).includes(q);
+    });
+    clear(list, items.length ? items.map((m) => {
+      const { names, route } = moveSummary(m);
+      return h('a', { class: 'admin-row', href: `#/move/${m.id}` },
+        h('span', { class: 'place-pin', 'aria-hidden': 'true' }, '➜'),
+        h('span', { class: 'admin-row-main' },
+          h('strong', {}, route),
+          h('span', { class: 'muted small' }, [formatDate(m.date), names, m.reason && t(MOVE_REASONS[m.reason] || m.reason)].filter(Boolean).join(' · '))));
+    }) : h('p', { class: 'muted' }, all.length ? t('No moves match.') : t('No moves yet. Record when someone moved from one place to another.')));
+  };
+  draw();
+  clear(view,
+    h('div', { class: 'admin-title' }, h('h1', {}, t('Moves')),
+      h('a', { class: 'btn btn-primary', href: '#/move/new' }, '+ ', t('Add a move'))),
+    h('p', { class: 'muted' }, t('A move is a journey from one place to another: who went, when, and why. Moves draw the arrows on the map.')),
+    h('input', {
+      type: 'search', class: 'search-input', placeholder: t('Find by person, place or year…'), value: moveQuery,
+      oninput: debounce((e) => { moveQuery = e.target.value; draw(); }, 80),
+    }),
+    list);
+}
+
+function moveEditorPage(id, params) {
+  const isNew = id === 'new' || !store.moves.has(id);
+  const draft = isNew ? { people: params.get('person') ? [params.get('person')] : [], reason: 'work' } : structuredClone(store.moves.get(id));
+  currentEditRoute = `move/${id}`;
+  const backTo = params.get('person') ? `#/person/${params.get('person')}` : '#/moves';
+  editorDirty = false;
+  const touch = () => { editorDirty = true; };
+  const { text, select, dateField, placeField } = fieldKit(touch);
+  const msg = h('p', { class: 'form-message', role: 'alert' });
+  const peopleBox = h('div', {});
+  const privacyNote = h('p', { class: 'muted small' });
+  const drawPeople = () => {
+    const fam = draft.people.filter((pid) => store.people.get(pid)?.privacy !== 'public');
+    privacyNote.textContent = fam.length
+      ? t('Family-only, because it includes: {names}.', { names: fam.map(personName).join(', ') })
+      : draft.people.length ? t('Public, because everyone in it is public.') : '';
+    clear(peopleBox,
+      draft.people.map((pid) => h('div', { class: 'rel-row' },
+        h('div', { class: 'rel-main' },
+          h('span', { class: 'monogram small', 'aria-hidden': 'true' }, initials(store.people.get(pid) || {})),
+          h('strong', {}, personName(pid))),
+        h('button', { type: 'button', class: 'btn btn-quiet btn-small', onclick: () => { draft.people = draft.people.filter((x) => x !== pid); touch(); drawPeople(); } }, t('Remove')))),
+      personPicker({
+        label: t('Add a person who moved'), excludeIds: draft.people, allowCreate: false,
+        onPick: (pid) => { draft.people.push(pid); touch(); drawPeople(); },
+      }),
+      privacyNote);
+  };
+  drawPeople();
+
+  const keep = () => {
+    if (view.querySelector('.date-preview.bad')) { msg.textContent = t('The date could not be read. Please fix it.'); return; }
+    try {
+      store.saveMove(isNew ? { ...draft, id: undefined } : draft);
+    } catch (err) { msg.textContent = err.message; return; }
+    editorDirty = false;
+    changed();
+    toast(t('Kept. Click "Save & publish" when you are ready.'), 'ok');
+    location.hash = backTo;
+  };
+
+  clear(view,
+    h('nav', { class: 'crumbs' }, h('a', { href: '#/moves' }, t('Moves')), ' / ', isNew ? t('New move') : moveSummary(draft).route),
+    h('h1', {}, isNew ? t('Add a move') : t('Edit move')),
+    h('section', { class: 'panel' }, h('h2', {}, t('Who moved?')),
+      h('p', { class: 'muted small' }, t('Add everyone who travelled together, e.g. the whole family.')), peopleBox),
+    h('section', { class: 'panel' }, h('h2', {}, t('Where and when?')),
+      h('div', { class: 'grid-2' },
+        placeField(t('From'), draft, { idKey: 'from', textKey: null, requireSaved: true }),
+        placeField(t('To'), draft, { idKey: 'to', textKey: null, requireSaved: true })),
+      h('div', { class: 'grid-2' },
+        dateField(t('When'), () => draft.date, (v) => { draft.date = v; }),
+        select(t('Why'), Object.fromEntries(Object.entries(MOVE_REASONS).map(([k, v]) => [k, t(v)])), () => draft.reason, (v) => { draft.reason = v; }))),
+    h('section', { class: 'panel' }, h('h2', {}, t('The story')),
+      text(t('What happened?'), () => draft.story, (v) => { draft.story = v; }, { multiline: true, rows: 6, placeholder: t('How did they travel? What did they take? Who helped?') })),
+    h('div', { class: 'editor-actions' }, msg,
+      h('div', { class: 'actions' },
+        h('button', { type: 'button', class: 'btn btn-primary', onclick: keep }, t('Keep these changes')),
+        h('button', { type: 'button', class: 'btn btn-quiet', onclick: () => { if (!editorDirty || confirm(t('Throw away your edits?'))) { editorDirty = false; location.hash = backTo; } } }, t('Cancel')),
+        !isNew && h('button', {
+          type: 'button', class: 'btn btn-danger',
+          onclick: () => { if (!confirm(t('Delete this move?'))) return; store.deleteMove(id); editorDirty = false; changed(); location.hash = '#/moves'; },
+        }, t('Delete move')))));
+}
+
+/** On a person's admin page: their moves. */
+function personMovesSection(person, isNew) {
+  const moves = store.movesOf(person.id).sort((a, b) => (sortKeyOf(a.date) ?? 1e9) - (sortKeyOf(b.date) ?? 1e9));
+  return h('section', { class: 'panel' }, h('h2', {}, t('Moves')),
+    moves.length ? moves.map((m) => {
+      const { route, names } = moveSummary(m);
+      return h('a', { class: 'admin-row', href: `#/move/${m.id}` },
+        h('span', { class: 'admin-row-main' }, h('strong', {}, route),
+          h('span', { class: 'muted small' }, [formatDate(m.date), m.people.length > 1 ? t('with {names}', { names }) : ''].filter(Boolean).join(' · '))));
+    }) : h('p', { class: 'muted' }, t('No moves recorded.')),
+    isNew
+      ? h('p', { class: 'muted small' }, t('Keep this person first, then you can add their moves.'))
+      : h('a', { class: 'btn btn-quiet btn-small', href: `#/move/new?person=${person.id}` }, '+ ', t('Add a move for this person')));
 }
 
 // =====================================================================
@@ -1234,6 +1653,8 @@ function helpPage() {
       h('p', {}, t('Family-only people are encrypted with the family password before they leave your computer. Public people can be read by anyone with the link, and anything that was ever public stays in the history. Living people are always family-only. When unsure, choose family-only.'))),
     item(t('Adding photos'),
       h('p', {}, t('Go to Photos, drag pictures onto the dotted box, then click "Save & publish". Up to about 40 at a time works best. Click a photo to give it a title and date, and click on faces to tag people. Photos showing living or family-only people always stay family-only.'))),
+    item(t('Places and moves'),
+      h('p', {}, t('Save each town once under Places (search the world map to put it on the map), with its older names and countries over time. Then pick it in any place box. Under Moves, record who moved from where to where, when and why; moves draw the arrows on the website’s map.'))),
     item(t('Running out of space'),
       h('p', {}, t('GitHub suggests keeping the archive under about 1 GB. Old versions of changed files are kept forever in the history, so replacing big files uses extra space. Keep your full-resolution originals elsewhere (an external drive and a cloud folder); the archive keeps smaller copies.'))),
     item(t('My token expired or stopped working'),

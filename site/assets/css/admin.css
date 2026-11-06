@@ -146,3 +146,25 @@
   .photo-editor { grid-template-columns: 1fr; }
   .photo-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
 }
+
+/* ---------- places & moves (admin) ---------- */
+.place-pin { width: 34px; text-align: center; font-size: 1.1rem; flex: none; }
+.place-status { display: block; font-size: .8rem; color: var(--ink-soft); margin-top: 2px; }
+.place-status.ok { color: var(--ok); }
+.place-map { height: 380px; border-radius: 10px; border: 1px solid var(--card-edge); margin: 10px 0 6px; z-index: 0; }
+.geo-search { display: flex; gap: 8px; }
+.geo-search input { flex: 1; }
+.geo-results { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.geo-result {
+  text-align: left; font: .88rem var(--sans); padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  background: var(--paper); border: 1px solid var(--card-edge); color: var(--ink);
+}
+.geo-result:hover { border-color: var(--accent); background: var(--accent-soft); }
+.period-rows { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.period-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%; }
+.period-row > input[type=text] { flex: 1 1 200px; width: auto; }
+.year-input { width: 90px !important; }
+@media (max-width: 760px) { .place-map { height: 300px; } }
+
+/* Keep focused fields visible above the sticky Keep/Cancel bar. */
+html { scroll-padding-bottom: 160px; }

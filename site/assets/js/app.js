@@ -13,6 +13,8 @@ import { renderTree } from './tree.js';
 import { lazyImage, tagLayer } from './lib/media.js';
 import { filterPhotos, galleryFacets, sortPhotos } from './lib/gallery.js';
 import { photoTitle } from './lib/model.js';
+import { placeText, MOVE_REASONS } from './lib/places.js';
+import { createMapPages } from './mapPages.js';
 
 const archive = new Archive('');
 const view = document.getElementById('view');
@@ -147,10 +149,19 @@ function factRow(label, value) {
   return h('div', { class: 'fact' }, h('dt', {}, label), h('dd', {}, value));
 }
 
+/** A place name for a date (historical name and country), linked to its page when saved. */
+function placeNode(obj, date) {
+  const text = placeText(obj, archive.places, date);
+  if (!text) return null;
+  return obj?.placeId && archive.places.has(obj.placeId) ? h('a', { href: `#/place/${obj.placeId}` }, text) : text;
+}
+
 function dateAndPlace(x) {
   if (!x) return null;
-  const parts = [formatDate(x.date), x.place].filter(Boolean);
-  return parts.length ? parts.join(', ') : null;
+  const date = formatDate(x.date);
+  const place = placeNode(x, x.date);
+  if (!date && !place) return null;
+  return [date, date && place ? ', ' : '', place];
 }
 
 function familySection(id) {
@@ -180,7 +191,7 @@ function familySection(id) {
 }
 
 function timelineSection(person) {
-  const items = buildTimeline(person, { graph: archive.graph, people: archive.people });
+  const items = buildTimeline(person, { graph: archive.graph, people: archive.people, moves: archive.moves });
   if (!items.length) return null;
   const label = (it) => {
     const who = it.personId ? link(it.personId) : null;
@@ -190,6 +201,11 @@ function timelineSection(person) {
       case 'marriage': return [t('Married'), ' ', who];
       case 'divorce': return [t('Divorced'), ' ', who];
       case 'child': return [t('Child born:'), ' ', who];
+      case 'migration': return [
+        t('Moved from'), ' ', placeNode({ placeId: it.from }, it.date) || '?', ' ', t('to'), ' ', placeNode({ placeId: it.to }, it.date) || '?',
+        it.reason ? ` (${t(MOVE_REASONS[it.reason] || it.reason).toLowerCase()})` : '',
+        it.with?.length ? [` ${t('with')} `, it.with.filter((x) => archive.people.has(x)).map((x, i) => [i ? ', ' : '', link(x)])] : '',
+      ];
       default: return [t(EVENT_TYPES[it.type] || EVENT_TYPES.other)];
     }
   };
@@ -199,7 +215,7 @@ function timelineSection(person) {
       h('span', { class: 'tl-date' }, formatDate(it.date) || '—'),
       h('span', { class: 'tl-body' },
         h('span', { class: 'tl-label' }, label(it)),
-        it.place && h('span', { class: 'tl-place' }, ` · ${it.place}`),
+        (it.place || it.placeId) && it.type !== 'migration' && h('span', { class: 'tl-place' }, ' · ', placeNode(it, it.date)),
         it.text && h('span', { class: 'tl-text' }, it.text))))));
 }
 
@@ -257,6 +273,7 @@ async function profilePage(id) {
         badges(p),
         h('div', { class: 'actions' },
           h('a', { class: 'btn', href: `#/tree/${id}` }, '🌳 ', t('See in family tree')),
+          hasMapData(id) && h('a', { class: 'btn btn-quiet', href: `#/map?person=${id}` }, '🗺 ', t('See on the map')),
           correctionLink(p),
           hasAdmin && h('a', { class: 'btn btn-quiet', href: `admin/#/person/${id}` }, '✎ ', t('Edit'))))),
     h('div', { class: 'profile-grid' },
@@ -349,7 +366,7 @@ function photoTile(ph, query = '') {
     lazyImage(() => archive.imageURL(ph, 'thumb'), { alt: photoTitle(ph) }),
     h('span', { class: 'photo-tile-caption' },
       h('span', { class: 'photo-tile-title' }, photoTitle(ph)),
-      h('span', { class: 'photo-tile-date' }, [formatDate(ph.date), ph.place].filter(Boolean).join(' · '))));
+      h('span', { class: 'photo-tile-date' }, [formatDate(ph.date), placeText(ph, archive.places, ph.date)].filter(Boolean).join(' · '))));
 }
 
 function portraitBox(p) {
@@ -394,7 +411,7 @@ function readQuery() {
 function galleryPage() {
   const filters = readQuery();
   const all = visiblePhotos();
-  const facets = galleryFacets(all);
+  const facets = galleryFacets(all, { placeName: (pid) => archive.places.get(pid)?.name });
   const list = filterPhotos(all, filters);
   const setFilter = (k, v) => {
     const next = { ...filters, [k]: v };
@@ -425,7 +442,7 @@ function galleryPage() {
     lockedNotice(),
     all.length ? h('div', { class: 'gallery-filters' },
       sel(t('Person'), 'person', people.map(([pid, n]) => h('option', { value: pid }, `${displayName(archive.people.get(pid))} (${n})`))),
-      sel(t('Place'), 'place', facets.places.map((pl) => h('option', { value: pl.label }, `${pl.label} (${pl.count})`))),
+      sel(t('Place'), 'place', facets.places.map((pl) => h('option', { value: pl.key }, `${pl.label} (${pl.count})`))),
       sel(t('Decade'), 'decade', [
         ...facets.decades.map((d) => h('option', { value: String(d.decade) }, `${d.decade}s (${d.count})`)),
         facets.undated ? h('option', { value: 'undated' }, `${t('No date')} (${facets.undated})`) : null,
@@ -489,7 +506,7 @@ async function photoPage(id) {
           next ? h('a', { class: 'btn btn-quiet btn-small', href: `#/photo/${next.id}${suffix}` }, t('Next'), ' →') : h('span'))),
       h('div', { class: 'viewer-info' },
         h('h1', {}, photoTitle(ph)),
-        h('p', { class: 'lifespan' }, [formatDate(ph.date), ph.place].filter(Boolean).join(' · ')),
+        h('p', { class: 'lifespan' }, formatDate(ph.date), ph.date && (ph.place || ph.placeId) ? ' · ' : '', placeNode(ph, ph.date)),
         ph.privacy === 'family' && h('span', { class: 'badge badge-family' }, t('Family only')),
         details.description && h('div', { class: 'panel prose-panel' }, paragraphs(details.description)),
         details.story && h('section', { class: 'panel prose-panel' }, h('h2', {}, t('The story')), paragraphs(details.story)),
@@ -498,6 +515,15 @@ async function photoPage(id) {
         h('div', { class: 'actions' }, mail))),
   ];
 }
+
+// ---------- map ----------
+
+function hasMapData(id) {
+  const s = archive.people.get(id);
+  return !!(s && (s.birth?.placeId || s.death?.placeId || s.lived?.length || [...archive.moves.values()].some((m) => m.people.includes(id))));
+}
+
+const mapPages = createMapPages({ archive, personChip, photoTile, lockedNotice, link });
 
 // ---------- unlock ----------
 
@@ -553,13 +579,15 @@ async function route() {
   const [, rawPage, rawId] = (location.hash.split('?')[0] || '#/').split('/');
   const page = rawPage;
   const id = rawId;
-  document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === ({ person: 'people', photo: 'gallery' }[page] || page || 'home')));
+  document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.page === ({ person: 'people', photo: 'gallery', place: 'map' }[page] || page || 'home')));
   let content;
   try {
     if (page === 'person' && id) content = await profilePage(decodeURIComponent(id));
     else if (page === 'people') content = peoplePage();
     else if (page === 'tree') content = treePage(id && decodeURIComponent(id));
     else if (page === 'gallery') content = galleryPage();
+    else if (page === 'map') content = mapPages.mapPage(readQuery());
+    else if (page === 'place' && id) content = mapPages.placePage(decodeURIComponent(id));
     else if (page === 'photo' && id) content = await photoPage(decodeURIComponent(id));
     else content = homePage();
   } catch (err) {
@@ -568,7 +596,8 @@ async function route() {
   }
   if (page !== 'tree') { currentTree?.destroy(); currentTree = null; }
   clear(view, content);
-  view.classList.toggle('wide', page === 'tree' || page === 'photo' || page === 'gallery');
+  view.classList.toggle('wide', ['tree', 'photo', 'gallery', 'map'].includes(page));
+  if (page !== 'map') mapPages.leave();
   const title = archive.config.siteTitle || t('Our Family Archive');
   const heading = view.querySelector('h1')?.textContent;
   document.title = heading && heading !== title ? `${heading} — ${title}` : title;

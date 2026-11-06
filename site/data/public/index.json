@@ -30,16 +30,22 @@
      "type": "about",
      "date": "1880"
     },
-    "place": "Kars"
+    "place": "Kars",
+    "placeId": "lsamplekars"
    },
    "death": {
     "date": {
      "type": "exact",
      "date": "1951-03-12"
     },
-    "place": "Yerevan"
+    "place": "Yerevan",
+    "placeId": "lsampleyerevan"
    },
-   "photo": "f4l6b1t5b2u"
+   "photo": "f4l6b1t5b2u",
+   "placeRefs": [
+    "lsamplekars",
+    "lsampleyerevan"
+   ]
   },
   {
    "id": "psample0002",
@@ -127,16 +133,22 @@
      "type": "exact",
      "date": "1910-06-05"
     },
-    "place": "Kars"
+    "place": "Kars",
+    "placeId": "lsamplekars"
    },
    "death": {
     "date": {
      "type": "exact",
      "date": "1988"
     },
-    "place": "Yerevan"
+    "place": "Yerevan",
+    "placeId": "lsampleyerevan"
    },
-   "photo": "f4l6b1t5b2u"
+   "photo": "f4l6b1t5b2u",
+   "placeRefs": [
+    "lsamplekars",
+    "lsampleyerevan"
+   ]
   },
   {
    "id": "psample0005",
@@ -156,14 +168,19 @@
     "date": {
      "type": "exact",
      "date": "1919"
-    }
+    },
+    "place": "Yerevan",
+    "placeId": "lsampleyerevan"
    },
    "death": {
     "date": {
      "type": "exact",
      "date": "2001"
     }
-   }
+   },
+   "placeRefs": [
+    "lsampleyerevan"
+   ]
   }
  ],
  "rels": [
@@ -225,6 +242,7 @@
   {
    "id": "f11041x006y",
    "choice": "public",
+   "privacy": "public",
    "v": 1,
    "w": 1500,
    "h": 1100,
@@ -235,6 +253,7 @@
     "to": "1929"
    },
    "place": "Yerevan",
+   "placeId": "lsampleyerevan",
    "title": "Anahit and Lusine (sample)",
    "tags": [
     {
@@ -247,12 +266,12 @@
      "x": 0.6,
      "y": 0.42
     }
-   ],
-   "privacy": "public"
+   ]
   },
   {
    "id": "f4l6b1t5b2u",
    "choice": "public",
+   "privacy": "public",
    "v": 1,
    "w": 1600,
    "h": 1200,
@@ -262,6 +281,7 @@
     "date": "1925"
    },
    "place": "Yerevan",
+   "placeId": "lsampleyerevan",
    "title": "At the forge (sample)",
    "tags": [
     {
@@ -274,8 +294,82 @@
      "x": 0.65,
      "y": 0.42
     }
+   ]
+  }
+ ],
+ "moves": [
+  {
+   "id": "msample01",
+   "people": [
+    "psample0001",
+    "psample0003",
+    "psample0004"
    ],
-   "privacy": "public"
+   "from": "lsamplekars",
+   "to": "lsampleyerevan",
+   "date": {
+    "type": "between",
+    "from": "1917",
+    "to": "1919"
+   },
+   "reason": "war",
+   "story": "SAMPLE STORY: the family left Kars during the war, carrying only what fitted on one cart."
+  }
+ ],
+ "places": [
+  {
+   "id": "lsamplekars",
+   "name": "Kars",
+   "lat": 40.6013,
+   "lng": 43.0975,
+   "countries": [
+    {
+     "country": "Russian Empire",
+     "from": 1878,
+     "to": 1917
+    },
+    {
+     "country": "First Republic of Armenia",
+     "from": 1918,
+     "to": 1920
+    },
+    {
+     "country": "Turkey",
+     "from": 1921
+    }
+   ]
+  },
+  {
+   "id": "lsampleyerevan",
+   "name": "Yerevan",
+   "lat": 40.1792,
+   "lng": 44.4991,
+   "names": [
+    {
+     "name": "Erivan",
+     "to": 1935
+    }
+   ],
+   "countries": [
+    {
+     "country": "Russian Empire",
+     "to": 1917
+    },
+    {
+     "country": "First Republic of Armenia",
+     "from": 1918,
+     "to": 1920
+    },
+    {
+     "country": "Soviet Union (Armenian SSR)",
+     "from": 1921,
+     "to": 1991
+    },
+    {
+     "country": "Armenia",
+     "from": 1992
+    }
+   ]
   }
  ]
 }

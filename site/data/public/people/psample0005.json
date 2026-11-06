@@ -16,7 +16,9 @@
   "date": {
    "type": "exact",
    "date": "1919"
-  }
+  },
+  "place": "Yerevan",
+  "placeId": "lsampleyerevan"
  },
  "death": {
   "date": {

@@ -24,14 +24,16 @@
    "type": "exact",
    "date": "1910-06-05"
   },
-  "place": "Kars"
+  "place": "Kars",
+  "placeId": "lsamplekars"
  },
  "death": {
   "date": {
    "type": "exact",
    "date": "1988"
   },
-  "place": "Yerevan"
+  "place": "Yerevan",
+  "placeId": "lsampleyerevan"
  },
  "occupation": "Teacher",
  "education": "Teachers’ college (sample)",

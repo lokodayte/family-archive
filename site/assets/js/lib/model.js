@@ -8,6 +8,8 @@
 //   data/family/people/<id>.enc      encrypted full record of a family-level person
 //   data/family/settings.enc         encrypted family-only settings (e.g. correction email)
 
+import { personLived, personPlaceRefs } from './places.js';
+
 export const SCRIPTS = ['latin', 'armenian', 'cyrillic'];
 export const SCRIPT_LABELS = { latin: 'Latin (English)', armenian: 'Armenian', cyrillic: 'Cyrillic (Russian)' };
 export const NAME_PARTS = ['first', 'patronymic', 'last', 'maiden'];
@@ -79,11 +81,15 @@ export function normalizePerson(p) {
 
 const SUMMARY_FIELDS = ['id', 'privacy', 'living', 'placeholder', 'sex', 'names', 'nicknames', 'birth', 'death', 'photo'];
 
-/** The small version of a person kept in the index (for search and the tree). */
+/** The small version of a person kept in the index (for search, the tree and the map). */
 export function summarize(person) {
   const p = normalizePerson(person);
   const s = {};
   for (const f of SUMMARY_FIELDS) if (p[f] !== undefined) s[f] = p[f];
+  const lived = personLived(p);
+  if (lived.length) s.lived = lived;
+  const refs = personPlaceRefs(p);
+  if (refs.length) s.placeRefs = refs;
   return s;
 }
 
@@ -104,7 +110,7 @@ export const relPeople = (r) => (r.type === 'parent' ? [r.parent, r.child] : [r.
  * A link is public only if every person in it is public.
  * A photo is public only if it was marked public AND everyone tagged in it is public.
  */
-export function splitIndex(peopleMap, rels, shardCount = DEFAULT_SHARDS, photosMap = new Map()) {
+export function splitIndex(peopleMap, rels, shardCount = DEFAULT_SHARDS, photosMap = new Map(), { places = new Map(), moves = new Map() } = {}) {
   const pub = { v: 1, people: [], rels: [] };
   const shards = Array.from({ length: shardCount }, () => ({ people: [], rels: [] }));
   const isPub = (id) => peopleMap.get(id)?.privacy === 'public';
@@ -135,6 +141,30 @@ export function splitIndex(peopleMap, rels, shardCount = DEFAULT_SHARDS, photosM
     if (clean.privacy === 'public') (pub.photos ||= []).push(clean);
     else (shards[shardOf(ph.id, shardCount)].photos ||= []).push(clean);
   }
+
+  // Moves: public only if everyone who moved is public.
+  const publicPlaces = new Set();
+  for (const m of [...(moves instanceof Map ? moves.values() : moves)].sort(byId)) {
+    const people = (m.people || []).filter((id) => peopleMap.has(id));
+    if (!people.length) continue;
+    const clean = { ...m, people };
+    if (people.every(isPub)) {
+      (pub.moves ||= []).push(clean);
+      for (const id of [m.from, m.to]) if (id) publicPlaces.add(id);
+    } else (shards[shardOf(m.id, shardCount)].moves ||= []).push(clean);
+  }
+  // Places: public only if something public needs them.
+  for (const s of pub.people) {
+    for (const id of [s.birth?.placeId, s.death?.placeId, ...(s.lived || []).map((l) => l.placeId), ...(s.placeRefs || [])]) {
+      if (id) publicPlaces.add(id);
+    }
+  }
+  for (const r of pub.rels) if (r.placeId) publicPlaces.add(r.placeId);
+  for (const ph of pub.photos || []) if (ph.placeId) publicPlaces.add(ph.placeId);
+  for (const pl of [...(places instanceof Map ? places.values() : places)].sort(byId)) {
+    if (publicPlaces.has(pl.id)) (pub.places ||= []).push(pl);
+    else (shards[shardOf(pl.id, shardCount)].places ||= []).push(pl);
+  }
   return { publicIndex: pub, familyShards: shards };
 }
 
@@ -144,9 +174,13 @@ export function mergeIndexes(publicIndex, familyShards = []) {
   const rels = [];
   const relIds = new Set();
   const photos = new Map();
+  const places = new Map();
+  const moves = new Map();
   const portraits = {};
   for (const part of [publicIndex, ...familyShards]) {
     if (!part) continue;
+    for (const pl of part.places || []) places.set(pl.id, pl);
+    for (const m of part.moves || []) moves.set(m.id, m);
     for (const s of part.people || []) people.set(s.id, s);
     for (const r of part.rels || []) {
       if (!relIds.has(r.id)) { relIds.add(r.id); rels.push(r); }
@@ -161,7 +195,12 @@ export function mergeIndexes(publicIndex, familyShards = []) {
   for (const [id, s] of people) {
     if (s.photo && !photos.has(s.photo)) { const { photo, ...rest } = s; people.set(id, rest); }
   }
-  return { people, rels: rels.filter((r) => relPeople(r).every((id) => people.has(id))), photos };
+  for (const [id, m] of moves) {
+    const ppl = (m.people || []).filter((pid) => people.has(pid));
+    if (!ppl.length) moves.delete(id);
+    else if (ppl.length !== m.people.length) moves.set(id, { ...m, people: ppl });
+  }
+  return { people, rels: rels.filter((r) => relPeople(r).every((id) => people.has(id))), photos, places, moves };
 }
 
 // ---------- photos & documents ----------
@@ -188,7 +227,7 @@ export function photoDetailsPath(id, privacy) {
   return privacy === 'public' ? `data/public/photos/${id}.json` : `data/family/photos/${id}.enc`;
 }
 
-const PHOTO_SUMMARY_FIELDS = ['id', 'choice', 'privacy', 'kind', 'v', 'w', 'h', 'bytes', 'date', 'place', 'title', 'tags'];
+const PHOTO_SUMMARY_FIELDS = ['id', 'choice', 'privacy', 'kind', 'v', 'w', 'h', 'bytes', 'date', 'place', 'placeId', 'title', 'tags'];
 const PHOTO_DETAIL_FIELDS = ['id', 'description', 'story', 'originalName', 'added'];
 
 /** Split a full photo record into the index part and the details part. */

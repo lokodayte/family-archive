@@ -6,7 +6,7 @@ import {
 import {
   summarize, normalizePerson, splitIndex, mergeIndexes, personPath, familyShardPath,
   PUBLIC_INDEX_PATH, CONFIG_PATH, SETTINGS_PATH, DEFAULT_SHARDS, relPeople, displayName,
-  effectivePrivacy, effectivePhotoPrivacy, mediaPath, photoDetailsPath, splitPhoto, newId,
+  effectivePrivacy, effectivePhotoPrivacy, mediaPath, photoDetailsPath, splitPhoto, newId, compact,
 } from './model.js';
 import { buildGraph, findProblems, PROBLEM_TEXT } from './relations.js';
 
@@ -35,6 +35,8 @@ export class AdminStore {
     this.people = new Map();
     this.rels = [];
     this.photos = new Map();
+    this.places = new Map();
+    this.moves = new Map();
     this.prevPrivacy = new Map();
     this.prevPhotos = new Map(); // photo summaries as they are on GitHub right now
     this.personCache = new Map();
@@ -78,6 +80,8 @@ export class AdminStore {
     this.people = merged.people;
     this.rels = merged.rels;
     this.photos = merged.photos;
+    this.places = merged.places;
+    this.moves = merged.moves;
     this.prevPrivacy = new Map([...this.people.values()].map((s) => [s.id, s.privacy]));
     this.prevPhotos = new Map([...this.photos.values()].map((s) => [s.id, structuredClone(s)]));
   }
@@ -229,6 +233,12 @@ export class AdminStore {
     for (const [pid, ph] of this.photos) {
       if (ph.tags?.some((t) => t.person === id)) this.photos.set(pid, { ...ph, tags: ph.tags.filter((t) => t.person !== id) });
     }
+    for (const [mid, m] of this.moves) {
+      if (!m.people?.includes(id)) continue;
+      const people = m.people.filter((p) => p !== id);
+      if (people.length) this.moves.set(mid, { ...m, people });
+      else this.moves.delete(mid);
+    }
     if (wasSaved) this.pending.set(id, { deleted: true });
     else this.pending.delete(id);
     this.ops.push({ text: `Deleted ${displayName(s)}`, public: s.privacy === 'public' });
@@ -321,6 +331,63 @@ export class AdminStore {
     return [...this.photos.values()].filter((p) => p.tags?.some((t) => t.person === personId));
   }
 
+  // ---------- places and moves (they live only in the index files) ----------
+
+  /** Add or change a saved place. Returns its id. */
+  savePlace(place) {
+    const clean = compact({ ...place, id: place.id || newId('l') }) || {};
+    clean.id = place.id || clean.id;
+    clean.name = (place.name || '').trim() || 'Unnamed place';
+    for (const k of ['lat', 'lng']) {
+      if (Number.isFinite(place[k])) clean[k] = Math.round(place[k] * 1e5) / 1e5; else delete clean[k];
+    }
+    const isNew = !this.places.has(clean.id);
+    this.places.set(clean.id, clean);
+    this.ops.push({ text: isNew ? 'Added a place' : 'Edited a place', place: true });
+    return clean.id;
+  }
+
+  /** What still uses a place (so you can be warned before deleting it). */
+  placeUsage(placeId) {
+    const moves = [...this.moves.values()].filter((m) => m.from === placeId || m.to === placeId);
+    const people = [...this.people.values()].filter((s) => s.birth?.placeId === placeId || s.death?.placeId === placeId
+      || (s.placeRefs || []).includes(placeId));
+    const photos = [...this.photos.values()].filter((p) => p.placeId === placeId);
+    const rels = this.rels.filter((r) => r.placeId === placeId);
+    return { moves, people, photos, rels };
+  }
+
+  /** Delete a place. Moves using it must be changed first; people and photos keep the name as text. */
+  deletePlace(placeId) {
+    const use = this.placeUsage(placeId);
+    if (use.moves.length) throw new Error(`This place is used by ${use.moves.length} move(s). Change or delete those moves first.`);
+    this.places.delete(placeId);
+    this.ops.push({ text: 'Deleted a place', place: true });
+  }
+
+  /** Add or change a move. Returns its id. */
+  saveMove(move) {
+    const people = [...new Set(move.people || [])].filter((id) => this.people.has(id));
+    if (!people.length) throw new Error('Choose at least one person who moved.');
+    if (!move.from && !move.to) throw new Error('Choose where they moved from or to.');
+    const clean = compact({ ...move, people }) || {};
+    clean.id = move.id || newId('m');
+    clean.people = people;
+    const isNew = !this.moves.has(clean.id);
+    this.moves.set(clean.id, clean);
+    this.ops.push({ text: isNew ? 'Added a move' : 'Edited a move', move: true });
+    return clean.id;
+  }
+
+  deleteMove(id) {
+    if (!this.moves.delete(id)) return;
+    this.ops.push({ text: 'Deleted a move', move: true });
+  }
+
+  movesOf(personId) {
+    return [...this.moves.values()].filter((m) => m.people?.includes(personId));
+  }
+
   // ---------- settings ----------
 
   setFamilySettings(settings) {
@@ -339,11 +406,16 @@ export class AdminStore {
 
   commitMessage() {
     // Never put family-only names in commit messages: the repository is public.
-    const pub = this.ops.filter((o) => o.public && !o.photo).map((o) => o.text);
-    const photos = this.ops.filter((o) => o.photo).length;
-    const fam = this.ops.length - pub.length - photos;
+    const generic = (o) => o.photo || o.place || o.move;
+    const pub = this.ops.filter((o) => o.public && !generic(o)).map((o) => o.text);
+    const count = (k, word) => {
+      const n = this.ops.filter((o) => o[k]).length;
+      if (n) parts.push(`${n} ${word} change${n === 1 ? '' : 's'}`);
+      return n;
+    };
     const parts = [...pub];
-    if (photos) parts.push(`${photos} photo change${photos === 1 ? '' : 's'}`);
+    const photos = count('photo', 'photo') + count('place', 'place') + count('move', 'move');
+    const fam = this.ops.length - pub.length - photos;
     if (fam) parts.push(`${fam} family-only change${fam === 1 ? '' : 's'}`);
     return parts.length ? `Archive: ${parts.join('; ')}` : 'Archive update';
   }
@@ -413,7 +485,7 @@ export class AdminStore {
     }
 
     // Index files: only the parts that actually changed are rewritten.
-    const { publicIndex, familyShards } = splitIndex(this.people, this.rels, this.shardCount, this.photos);
+    const { publicIndex, familyShards } = splitIndex(this.people, this.rels, this.shardCount, this.photos, { places: this.places, moves: this.moves });
     const pubText = JSON.stringify(publicIndex);
     if (pubText !== this.lastPublicText) {
       changes.push({ path: PUBLIC_INDEX_PATH, content: JSON.stringify(publicIndex, null, 1) });
@@ -513,7 +585,7 @@ export class AdminStore {
       }
       changes.push({ path: photoDetailsPath(s.id, 'family'), content: await encryptJSON(newKey, await this.getPhotoDetails(s.id)) });
     }
-    const { familyShards } = splitIndex(this.people, this.rels, this.shardCount, this.photos);
+    const { familyShards } = splitIndex(this.people, this.rels, this.shardCount, this.photos, { places: this.places, moves: this.moves });
     for (let i = 0; i < familyShards.length; i++) {
       changes.push({ path: familyShardPath(i), content: await encryptJSON(newKey, familyShards[i]) });
     }

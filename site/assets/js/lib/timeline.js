@@ -27,27 +27,34 @@ export function lifespan(s) {
  * Build the timeline: birth, marriages, divorces, children, own events, death.
  * Undated events keep their natural place: birth first, death last, others in between.
  */
-export function buildTimeline(person, { graph, people }) {
+export function buildTimeline(person, { graph, people, moves = [] }) {
   const items = [];
   const add = (item, fallback) => items.push({ ...item, _k: sortKey(item.date), _f: fallback, _i: items.length });
 
-  if (person.birth?.date || person.birth?.place) add({ type: 'birth', date: person.birth.date, place: person.birth.place }, -1);
+  if (person.birth?.date || person.birth?.place) add({ type: 'birth', date: person.birth.date, place: person.birth.place, placeId: person.birth.placeId }, -1);
 
   for (const sp of graph.spousesOf(person.id)) {
     const r = sp.rel;
-    add({ type: 'marriage', date: r.start, place: r.place, personId: sp.id }, 0);
+    add({ type: 'marriage', date: r.start, place: r.place, placeId: r.placeId, personId: sp.id }, 0);
     if (r.end && r.endReason === 'divorce') add({ type: 'divorce', date: r.end, personId: sp.id }, 0);
   }
   for (const c of graph.childrenOf(person.id)) {
     const child = people.get(c.id);
     if (!child) continue;
-    add({ type: 'child', date: child.birth?.date, place: child.birth?.place, personId: c.id, kind: c.kind }, 0);
+    add({ type: 'child', date: child.birth?.date, place: child.birth?.place, placeId: child.birth?.placeId, personId: c.id, kind: c.kind }, 0);
+  }
+  for (const m of moves instanceof Map ? moves.values() : moves) {
+    if (!m.people?.includes(person.id)) continue;
+    add({
+      type: 'migration', date: m.date, from: m.from, to: m.to, reason: m.reason, text: m.story, moveId: m.id,
+      with: m.people.filter((id) => id !== person.id),
+    }, 0);
   }
   for (const e of person.events || []) {
-    add({ type: e.type || 'other', date: e.date, place: e.place, text: e.description, own: true }, 0);
+    add({ type: e.type || 'other', date: e.date, place: e.place, placeId: e.placeId, text: e.description, own: true }, 0);
   }
   if (!person.living && (person.death?.date || person.death?.place)) {
-    add({ type: 'death', date: person.death.date, place: person.death.place }, 1);
+    add({ type: 'death', date: person.death.date, place: person.death.place, placeId: person.death.placeId }, 1);
   }
 
   // Groups: undated birth (-1), dated events in date order (0),

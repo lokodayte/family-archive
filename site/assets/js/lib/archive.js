@@ -89,10 +89,12 @@ export class Archive {
   }
 
   rebuild() {
-    const { people, rels, photos } = mergeIndexes(this.publicIndex, this.familyShards);
+    const { people, rels, photos, places, moves } = mergeIndexes(this.publicIndex, this.familyShards);
     this.people = people;
     this.rels = rels;
     this.photos = photos;
+    this.places = places;
+    this.moves = moves;
     this.graph = buildGraph(rels);
   }
 
