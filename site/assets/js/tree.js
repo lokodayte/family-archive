@@ -23,8 +23,10 @@ function truncate(text, max) {
 export function renderTree(container, {
   graph, people, focus, up = 3, down = 3, onSelect, onToggle,
   expandUp, expandDown, collapseUp, collapseDown,
+  layout: given, startAt, selected,
 }) {
-  const layout = layoutTree(graph, focus, {
+  // A ready-made layout (e.g. the whole family) can be passed in instead.
+  const layout = given || layoutTree(graph, focus, {
     up, down, expandUp, expandDown, collapseUp, collapseDown,
     sortKeyOf: (id) => sortKey(people.get(id)?.birth?.date),
     sexOf: (id) => people.get(id)?.sex,
@@ -43,7 +45,7 @@ export function renderTree(container, {
     if (!p) continue;
     const name = displayName(p);
     const g = s('g', {
-      class: `tree-node role-${node.role} sex-${p.sex || 'unknown'}${p.placeholder ? ' placeholder' : ''}${p.privacy === 'family' ? ' family' : ''}`,
+      class: `tree-node role-${node.role}${selected === node.id ? ' role-focus' : ''} sex-${p.sex || 'unknown'}${p.placeholder ? ' placeholder' : ''}${p.privacy === 'family' ? ' family' : ''}`,
       transform: `translate(${node.x - NODE_W / 2},${node.y - NODE_H / 2})`,
       tabindex: '0',
       role: 'button',
@@ -119,7 +121,8 @@ export function renderTree(container, {
     // On small screens start zoomed on the chosen person instead of showing everything tiny.
     if (rect.width && rect.width < 700 && w > rect.width * 1.6) {
       const w2 = rect.width * 1.25;
-      vb = { x: -w2 / 2, y: -(w2 * aspect) / 2, w: w2, h: w2 * aspect };
+      const c = startAt || { x: 0, y: 0 };
+      vb = { x: c.x - w2 / 2, y: c.y - (w2 * aspect) / 2, w: w2, h: w2 * aspect };
     }
     apply();
   }

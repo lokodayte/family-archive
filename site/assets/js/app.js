@@ -16,6 +16,7 @@ import { photoTitle } from './lib/model.js';
 import { placeText, MOVE_REASONS } from './lib/places.js';
 import { createMapPages } from './mapPages.js';
 import { howRelated, shortestPath } from './lib/relate.js';
+import { layoutWhole } from './lib/wholeLayout.js';
 
 const archive = new Archive('');
 const view = document.getElementById('view');
@@ -335,22 +336,48 @@ function treePage(id) {
     hourglass: [t('Ancestors and descendants'), treeState.up, treeState.down],
     ancestors: [t('Ancestors only'), treeState.up, 0],
     descendants: [t('Descendants only'), 0, treeState.down],
+    whole: [t('Whole family (everyone)'), 0, 0],
   };
+  const whole = treeState.view === 'whole';
   const [, up, down] = views[treeState.view];
   const genSelect = (label, key, value) => h('label', { class: 'gen-select' }, label, ' ',
     h('select', {
       value: String(value),
       onchange: (e) => { treeState[key] = Number(e.target.value); route(); },
     }, [1, 2, 3, 4, 5, 6, 7, 8].map((n) => h('option', { value: String(n) }, String(n)))));
-  const panel = h('div', { class: 'tree-panel' },
-    h('div', {},
-      h('strong', {}, displayName(s)), ' ', h('span', { class: 'muted' }, lifespan(s))),
-    h('div', { class: 'actions' },
-      h('a', { class: 'btn btn-quiet btn-small', href: `#/relate?a=${focus}` }, t('How are we related?')),
-      h('a', { class: 'btn btn-small', href: `#/person/${focus}` }, t('Open profile'))));
+  const panel = h('div', { class: 'tree-panel' });
+  const fillPanel = (pid) => {
+    const p = archive.people.get(pid);
+    clear(panel,
+      h('div', {},
+        h('strong', {}, displayName(p)), ' ', h('span', { class: 'muted' }, lifespan(p))),
+      h('div', { class: 'actions' },
+        h('a', { class: 'btn btn-quiet btn-small', href: `#/relate?a=${pid}` }, t('How are we related?')),
+        whole && h('button', {
+          class: 'btn btn-quiet btn-small',
+          onclick: () => { treeState.view = 'hourglass'; location.hash = `#/tree/${pid}`; route(); },
+        }, t('Centre the tree here')),
+        h('a', { class: 'btn btn-small', href: `#/person/${pid}` }, t('Open profile'))));
+  };
+  fillPanel(focus);
+  let wholeSelected = null;
+  let wholeLayout = null;
+  if (whole) {
+    wholeLayout = layoutWhole(archive.graph, [...archive.people.keys()], { sortKeyOf: (pid) => sortKey(archive.people.get(pid)?.birth?.date) });
+    clear(panel, h('span', { class: 'muted' }, t('{n} people in {f} family group(s). Click anyone to see their details.', { n: archive.people.size, f: wholeLayout.families })));
+  }
 
   const draw = () => {
     currentTree?.destroy();
+    if (whole) {
+      const b = wholeLayout.bounds;
+      currentTree = renderTree(stage, {
+        graph: archive.graph, people: archive.people, layout: wholeLayout, selected: wholeSelected,
+        startAt: { x: (b.minX + b.maxX) / 2, y: b.minY + 200 },
+        onSelect: (pid) => { wholeSelected = pid; fillPanel(pid); stage.querySelectorAll('.tree-node').forEach((el) => el.classList.toggle('role-focus', el.dataset.id === pid)); },
+      });
+      return;
+    }
     currentTree = renderTree(stage, {
       graph: archive.graph, people: archive.people, focus, up, down,
       expandUp: treeState.open.up, expandDown: treeState.open.down,
@@ -386,7 +413,9 @@ function treePage(id) {
           h('button', { class: 'btn btn-icon', 'aria-label': t('Zoom in'), onclick: () => currentTree?.zoomBy(0.8) }, '+'),
           h('button', { class: 'btn btn-icon', 'aria-label': t('Zoom out'), onclick: () => currentTree?.zoomBy(1.25) }, '−'),
           h('button', { class: 'btn btn-quiet', onclick: () => currentTree?.fit() }, t('Fit'))))),
-    h('p', { class: 'muted small tree-help' }, t('Drag to move, scroll or pinch to zoom. Click a person to put them in the centre. Use the round ▲ ▼ buttons to open a branch, and – to fold it away.')),
+    h('p', { class: 'muted small tree-help' }, whole
+      ? t('Everyone in the archive, oldest generation at the top. Drag to move, scroll or pinch to zoom, “Fit” to see it all. Click a person for details.')
+      : t('Drag to move, scroll or pinch to zoom. Click a person to put them in the centre. Use the round ▲ ▼ buttons to open a branch, and – to fold it away.')),
     lockedNotice(),
     stage,
     panel,

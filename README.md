@@ -177,6 +177,7 @@ The background map comes from **OpenStreetMap** (free, no account). Viewing the 
 ## 5d. The family tree and "How are we related?"
 
 - **Tree → Show:** *Ancestors and descendants*, *Ancestors only* or *Descendants only*. You can choose how many generations to show.
+- **Tree → Show → Whole family (everyone):** everyone in the archive on one big picture, with the oldest generation at the top, couples side by side, and married-in families joined in. Press **Fit** to see it all, then drag and zoom. Click a person for **Open profile**, **How are we related?** or **Centre the tree here**. Remember to enter the family password first, or family-only people won't appear.
 - The round **▲ / ▼** buttons on a box open that branch even beyond the generation limit. The faint **–** button folds a branch away. Click any person to put them in the centre.
 - Very large trees stay fast: only the part you're looking at is drawn.
 - **How are we related?** (on the home page, on every profile and under the tree): choose two people. The answer is a sentence such as *"Lusine is Davit's half-great-aunt"*, with their closest common ancestor and the chain of family links step by step. It handles cousins (*second cousin once removed*), half relations, in-laws, step-parents and spouses.

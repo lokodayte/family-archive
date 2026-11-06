@@ -123,3 +123,92 @@ test('tree: a big family lays out quickly without overlaps', () => {
     for (let i = 1; i < xs.length; i++) assert.ok(xs[i] - xs[i - 1] >= 172);
   }
 });
+
+// ---------- whole-family view ----------
+import { layoutWhole } from '../site/assets/js/lib/wholeLayout.js';
+
+function checkLayout(graph, ids, layout) {
+  const pos = new Map(layout.nodes.map((n) => [n.id, n]));
+  assert.equal(layout.nodes.length, ids.length, 'everyone appears exactly once');
+  for (const id of ids) {
+    for (const p of graph.parentsOf(id).filter((x) => x.kind !== 'step' && pos.has(x.id))) {
+      assert.ok(pos.get(p.id).y < pos.get(id).y, `${p.id} (parent) above ${id}`);
+    }
+  }
+  const rows = new Map();
+  for (const n of layout.nodes) { if (!rows.has(n.y)) rows.set(n.y, []); rows.get(n.y).push(n.x); }
+  for (const xs of rows.values()) {
+    xs.sort((a, b) => a - b);
+    for (let i = 1; i < xs.length; i++) assert.ok(xs[i] - xs[i - 1] >= 172 - 0.01, 'no overlapping boxes');
+  }
+  return pos;
+}
+
+test('whole family: everyone, generations in rows, couples side by side', () => {
+  const ids = samplePeople().map((p) => p.id);
+  const layout = layoutWhole(g, ids, { sortKeyOf: () => null });
+  const pos = checkLayout(g, ids, layout);
+  assert.equal(pos.get(P(1)).y, pos.get(P(2)).y, 'Hovhannes and Mariam on one row');
+  assert.equal(pos.get(P(1)).y, pos.get(P(3)).y, 'Hovhannes and Anahit on one row');
+  assert.equal(pos.get(P(4)).y, pos.get(P(6)).y, 'Grigor and Elena on one row');
+  assert.equal(pos.get(P(7)).y, pos.get(P(10)).y, 'Armen and Davit’s unknown mother on one row');
+  assert.ok(Math.abs(pos.get(P(4)).x - pos.get(P(6)).x) <= 193, 'a couple sits next to each other');
+  assert.equal(new Set(layout.nodes.map((n) => n.y)).size, 4, 'four generations');
+  assert.equal(layout.families, 1);
+  assert.ok(layout.links.some((l) => l.kind === 'spouse'));
+});
+
+test('whole family: separate families and loose people do not overlap', () => {
+  const rels = [
+    { id: '1', type: 'parent', parent: 'A', child: 'C' }, { id: '2', type: 'parent', parent: 'B', child: 'C' },
+    { id: '3', type: 'spouse', a: 'A', b: 'B' },
+    { id: '4', type: 'parent', parent: 'X', child: 'Y' },
+  ];
+  const gg = buildGraph(rels);
+  const ids = ['A', 'B', 'C', 'X', 'Y', 'LONE'];
+  const layout = layoutWhole(gg, ids);
+  checkLayout(gg, ids, layout);
+  assert.equal(layout.families, 3);
+});
+
+test('whole family: a married-in family joins at the right height; odd data does not hang', () => {
+  // Elena's parents (married-in family) should sit just above her, not at the very top.
+  const rels = [...sampleRels(),
+    { id: 'e1', type: 'parent', parent: 'EF', child: P(6) }, { id: 'e2', type: 'parent', parent: 'EM', child: P(6) }];
+  const gg = buildGraph(rels);
+  const ids = [...samplePeople().map((p) => p.id), 'EF', 'EM'];
+  const pos = checkLayout(gg, ids, layoutWhole(gg, ids));
+  assert.equal(pos.get('EF').y, pos.get(P(1)).y, 'Elena’s parents on the same row as Grigor’s parents');
+  // Cousins who married each other: still finishes and stays valid.
+  const loop = buildGraph([
+    { id: 'a', type: 'parent', parent: 'G', child: 'P1' }, { id: 'b', type: 'parent', parent: 'G', child: 'P2' },
+    { id: 'c', type: 'parent', parent: 'P1', child: 'C1' }, { id: 'd', type: 'parent', parent: 'P2', child: 'C2' },
+    { id: 'e', type: 'spouse', a: 'C1', b: 'C2' }, { id: 'f', type: 'parent', parent: 'C1', child: 'K' }, { id: 'g', type: 'parent', parent: 'C2', child: 'K' },
+  ]);
+  checkLayout(loop, ['G', 'P1', 'P2', 'C1', 'C2', 'K'], layoutWhole(loop, ['G', 'P1', 'P2', 'C1', 'C2', 'K']));
+});
+
+test('whole family: a thousand people lay out quickly', () => {
+  const rels = [];
+  const ids = ['root', 'rootw'];
+  rels.push({ id: 'w', type: 'spouse', a: 'root', b: 'rootw' });
+  let n = 0;
+  const grow = (a, b, depth) => {
+    if (depth === 5) return;
+    for (let i = 0; i < 3; i++) {
+      const c = `p${++n}`;
+      const s = `s${n}`;
+      ids.push(c, s);
+      rels.push({ id: `ra${n}`, type: 'parent', parent: a, child: c }, { id: `rb${n}`, type: 'parent', parent: b, child: c }, { id: `rs${n}`, type: 'spouse', a: c, b: s });
+      grow(c, s, depth + 1);
+    }
+  };
+  grow('root', 'rootw', 0);
+  const gg = buildGraph(rels);
+  const t0 = performance.now();
+  const layout = layoutWhole(gg, ids);
+  const ms = performance.now() - t0;
+  checkLayout(gg, ids, layout);
+  assert.ok(ids.length > 700);
+  assert.ok(ms < 2000, `took ${Math.round(ms)} ms`);
+});
