@@ -1,5 +1,18 @@
 {
   "siteTitle": "Our Family Archive",
   "familyShards": 16,
-  "repo": "lokodayte/family-archive"
+  "repo": "lokodayte/family-archive",
+  "crypto": {
+    "v": 1,
+    "kdf": {
+      "name": "PBKDF2",
+      "hash": "SHA-256",
+      "iterations": 600000,
+      "salt": "N8xp+g+SIwUQTBSo67KF1Q=="
+    },
+    "wrapped": {
+      "iv": "P+G3k5arnN8Fyl7+",
+      "ct": "T3l2aYudg4NeurP4I874hXj7zRRFDKoeIdvS4/zcoL93QCR0X+5kmqVL8g3UmdmL"
+    }
+  }
 }
