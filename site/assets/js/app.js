@@ -107,10 +107,14 @@ function homePage() {
         h('a', { href: '#/relate' }, t('How are we related?')))),
     lockedNotice(),
     albumStrip(),
-    earliest.length && h('section', {},
+    !all.length ? h('section', { class: 'panel empty-welcome' },
+      h('h2', {}, t('This archive is ready for its first story')),
+      h('p', {}, t('No one has been added yet. If you look after this archive, open the admin panel to add the first person.')),
+      h('a', { class: 'btn btn-primary', href: 'admin/' }, t('Open the admin panel'))) : null,
+    earliest.length ? h('section', {},
       h('h2', { class: 'section-title' }, t('Begin with the earliest generations')),
       h('div', { class: 'card-grid' }, earliest.map(personCard)),
-      h('p', {}, h('a', { href: '#/people', class: 'btn btn-quiet' }, t('See everyone →')))),
+      h('p', {}, h('a', { href: '#/people', class: 'btn btn-quiet' }, t('See everyone →')))) : null,
   ];
 }
 
@@ -125,7 +129,7 @@ function peoplePage() {
       ? searchPeople(archive.people, q, 500)
       : [...archive.people.values()].sort((a, b) =>
         lastName(a).localeCompare(lastName(b)) || displayName(a).localeCompare(displayName(b)));
-    if (!people.length) return clear(list, h('p', { class: 'muted' }, t('No one found with that name.')));
+    if (!people.length) return clear(list, h('p', { class: 'muted' }, archive.people.size ? t('No one found with that name.') : t('No one has been added yet.')));
     if (q?.trim()) return clear(list, h('div', { class: 'card-grid' }, people.map(personCard)));
     const groups = new Map();
     for (const s of people) {
@@ -673,6 +677,7 @@ function setupUnlockDialog() {
 
 function updateHeader() {
   const slot = document.getElementById('lock-slot');
+  document.querySelector('.brand-title').textContent = archive.config.siteTitle || t('Our Family Archive');
   if (!archive.hasFamilyData) return clear(slot);
   clear(slot, archive.unlocked
     ? h('button', {

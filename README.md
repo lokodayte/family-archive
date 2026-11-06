@@ -60,14 +60,16 @@ The admin panel needs a key from GitHub, called a *token*, that allows it to sav
 
 > Keep the token secret, like a password. If you think it has leaked, delete it on GitHub (same page as above) and make a new one.
 
-### b) Replace the sample family
+### b) Choose the family password (first visit only)
 
-The archive starts with a **made-up sample family** (the "Sampleyans"), four fake sample photos, and sample places and moves, so you can try things out. The sample family password is in the setup message you received.
+The archive starts empty. The first time you unlock the admin panel, it asks you to **choose a family password**. This password locks all family-only information.
+- A few random words work well: easy to remember, hard to guess. Use at least 10 characters.
+- **Write it down somewhere safe.** If it's lost, family-only information can't be recovered by anyone.
+- Share it only with relatives who should see everything.
 
-When you're ready to add real people:
-1. In the admin panel, go to **Settings → Family password**. Set your own family password and tick **Full re-lock**. This is cheap now because there's almost nothing stored yet.
-2. Delete the sample people, photos, moves and places: open each one, click **Delete**, then **Save & publish**. (Delete moves before places.)
-3. In **Settings**, set the **Archive title** and your **email for corrections**.
+Then, in **Settings**, set the **Archive title** (for example "The Petrosyan Family Archive") and your **email for corrections**, and click **Save & publish**.
+
+> Want to practise first? See [section 11](#practice): practice mode never saves anything.
 
 <a id="adding-a-person"></a>
 ## 3. Adding a person

@@ -1,18 +1,5 @@
 {
-  "siteTitle": "The Sampleyan Family Archive",
+  "siteTitle": "Our Family Archive",
   "familyShards": 16,
-  "crypto": {
-    "v": 1,
-    "kdf": {
-      "name": "PBKDF2",
-      "hash": "SHA-256",
-      "iterations": 600000,
-      "salt": "SWRDQBsPtJi3n2IZe+FwmQ=="
-    },
-    "wrapped": {
-      "iv": "VTU/lmQEa4G4VUv7",
-      "ct": "WHMCheSuBmlnRhZw7GXUAdDfgF1XFUt/9JJi7UYSKMNa7tWhOYjTfa607fY5SSPu"
-    }
-  },
   "repo": "lokodayte/family-archive"
 }

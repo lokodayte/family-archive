@@ -198,7 +198,7 @@ function createPasswordScreen() {
     },
   },
   h('h1', {}, t('Choose a family password')),
-  h('p', {}, t('This password locks all family-only information. Share it only with relatives. Tip: a few random words are easy to remember and hard to guess, e.g. "apricot river lantern 48".')),
+  h('p', {}, t('This password locks all family-only information. Share it only with relatives. Tip: a few random words are easy to remember and hard to guess, e.g. "plum garden violin 72".')),
   h('p', { class: 'notice notice-warn' }, t('Write it down somewhere safe. If it is lost, family-only information cannot be recovered by anyone.')),
   h('label', { class: 'field' }, h('span', {}, t('New family password')), a),
   h('label', { class: 'field' }, h('span', {}, t('Type it again')), b),

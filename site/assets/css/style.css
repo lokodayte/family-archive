@@ -475,3 +475,5 @@ img.lazy.missing { opacity: 1; }
   .tree-help { font-size: .82rem; }
   h1 { font-size: 1.75rem; }
 }
+.empty-welcome { max-width: 620px; margin: 28px auto; text-align: center; }
+.empty-welcome h2 { font-size: 1.3rem; }
