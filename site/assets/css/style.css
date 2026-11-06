@@ -345,7 +345,7 @@ img.lazy.missing { opacity: 1; }
 .portrait.has-photo { display: block; background: var(--paper-deep); }
 .photo-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 .gallery-grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
-.album-strip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(170px, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; }
+.album-strip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(150px, 210px); gap: 12px; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; }
 .album-strip .photo-tile { scroll-snap-align: start; }
 .photo-tile {
   position: relative; display: block; aspect-ratio: 1; overflow: hidden; border-radius: 10px;
