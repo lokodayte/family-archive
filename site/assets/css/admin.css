@@ -190,3 +190,13 @@ html { scroll-padding-bottom: 160px; }
 .token-fix ol { margin: 8px 0 0; padding-left: 20px; }
 .token-fix li { margin-bottom: 4px; }
 .save-error { max-width: 980px; margin: 16px auto 0; padding: 0 16px; }
+
+/* ---------- name guesses ---------- */
+.name-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-top: 4px; min-height: 0; }
+.name-hint:empty { display: none; }
+.guess-chip {
+  font: 500 .92rem var(--sans); padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  background: var(--accent-soft); color: var(--accent-strong); border: 1px solid transparent;
+}
+.guess-chip:hover { border-color: var(--accent); }
+.name-tip { margin: 0 0 8px; }

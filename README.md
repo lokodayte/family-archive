@@ -76,9 +76,9 @@ Then, in **Settings**, set the **Archive title** (for example "The Petrosyan Fam
 ## 3. Adding a person
 
 1. Admin panel → **People** → **+ Add a person**.
-2. **Basics:** living or deceased, sex, and who can see them (see [privacy](#privacy)).
+2. **Basics:** new people start as **Living**; switch to **Deceased** to fill in death details. Also set sex, and who can see them (see [privacy](#privacy)).
    Tick **Unknown person (placeholder)** for someone who must exist but isn't known yet (for example "great-grandfather's first wife"). The gap then shows up in the tree.
-3. **Names:** fill in whichever alphabets you know: Latin, Armenian, Cyrillic. Include the patronymic and maiden name if known. Nicknames go in one box, separated by commas.
+3. **Names:** type the names in **English** first. The **Armenian** and **Russian** boxes fill in by themselves when the spelling is clear (for example Hovhannes → Հովհաննես / Ованес), marked *"Filled in automatically — please check"*. When it's less certain (for example Mkrtchyan), **guesses** appear under the box: click the right one, or type your own. Anything you type yourself is never changed. Patronymics get both styles: Armenian *Գրիգորի*, and Russian *Григорьевич* or *Григорьевна* once the sex is set. Nicknames go in one box, separated by commas.
 4. **Birth and death:** dates can be vague (see [dates](#dates)). Places are plain text for now, such as "Kars, Russian Empire".
 5. **Family links:** see below.
 6. **Life:** occupation, education, languages, biography. Stories, life events (moves, military service…) and sources each have an **+ Add** button.

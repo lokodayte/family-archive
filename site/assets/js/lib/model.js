@@ -46,7 +46,7 @@ export function emptyPerson() {
   return {
     id: newId('p'),
     privacy: 'family',
-    living: false,
+    living: true, // new people start as living; switch to deceased when needed
     placeholder: false,
     sex: 'unknown',
     names: {},

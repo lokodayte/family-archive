@@ -18,6 +18,7 @@ import {
 } from './lib/places.js';
 import { loadLeaflet, baseTiles, geocode } from './lib/leaflet.js';
 import { buildBackup, gatherPeople } from './lib/backup.js';
+import { suggestName } from './lib/transliterate.js';
 import { exportGedcom, importGedcom } from './lib/gedcom.js';
 import { parseDate, formatDate, DATE_HELP, sortKey as sortKeyOf } from './lib/dates.js';
 import { PARENT_KINDS } from './lib/relations.js';
@@ -747,17 +748,78 @@ async function editorPage(id) {
   drawDeath();
 
   // ----- names -----
+  // Names: typing in English fills in Armenian and Russian when fairly sure,
+  // otherwise offers guesses to click. Anything you type yourself is never overwritten.
+  const NAME_PARTS_UI = [
+    ['first', t('First name')], ['last', t('Last name')],
+    ['patronymic', t('Patronymic (father’s name)')], ['maiden', t('Maiden name (birth surname)')],
+  ];
+  const nameInputs = {};
+  const autoFilled = new Set();
+  const setName = (sc, part, value, auto) => {
+    const key = `${sc}.${part}`;
+    person.names[sc][part] = value;
+    nameInputs[key].input.value = value;
+    if (auto) autoFilled.add(key); else autoFilled.delete(key);
+    touch();
+  };
+  const showHint = (sc, part, auto, options) => {
+    const key = `${sc}.${part}`;
+    const { hint } = nameInputs[key];
+    const chip = (text) => h('button', {
+      type: 'button', class: 'guess-chip', lang: sc === 'armenian' ? 'hy' : 'ru',
+      onclick: () => { setName(sc, part, text, false); clear(hint); },
+    }, text);
+    if (auto) {
+      clear(hint, h('span', { class: 'muted small' }, '✓ ', t('Filled in automatically — please check.')),
+        options.length ? [' ', h('span', { class: 'muted small' }, t('Or:')), ' ', options.map(chip)] : null);
+    } else if (options.length) {
+      clear(hint, h('span', { class: 'muted small' }, t('Guesses — click one:')), ' ', options.map(chip));
+    } else clear(hint);
+  };
+  const suggestFrom = (part, { fill = true } = {}) => {
+    const latin = person.names.latin[part] || '';
+    for (const sc of ['armenian', 'cyrillic']) {
+      const key = `${sc}.${part}`;
+      const current = person.names[sc][part] || '';
+      if (current && !autoFilled.has(key)) { clear(nameInputs[key].hint); continue; } // your own text: leave it
+      if (!latin.trim()) {
+        if (autoFilled.has(key)) setName(sc, part, '', false);
+        clear(nameInputs[key].hint);
+        continue;
+      }
+      const { auto, options } = suggestName(latin, sc, part, { sex: person.sex });
+      if (!fill) { showHint(sc, part, null, [auto, ...options].filter(Boolean)); continue; }
+      if (auto) setName(sc, part, auto, true);
+      else if (autoFilled.has(key)) setName(sc, part, '', false);
+      showHint(sc, part, auto, options);
+    }
+  };
+  const suggestSoon = Object.fromEntries(NAME_PARTS_UI.map(([part]) => [part, debounce(() => suggestFrom(part), 300)]));
   const nameBlocks = SCRIPTS.map((sc) => {
     const n = person.names[sc];
     const lang = { latin: 'en', armenian: 'hy', cyrillic: 'ru' }[sc];
     return h('fieldset', { class: 'name-block' },
       h('legend', {}, t(SCRIPT_LABELS[sc])),
-      h('div', { class: 'grid-2' },
-        text(t('First name'), () => n.first, (v) => { n.first = v; }, { lang }),
-        text(t('Last name'), () => n.last, (v) => { n.last = v; }, { lang }),
-        text(t('Patronymic (father’s name)'), () => n.patronymic, (v) => { n.patronymic = v; }, { lang }),
-        text(t('Maiden name (birth surname)'), () => n.maiden, (v) => { n.maiden = v; }, { lang })));
+      sc === 'latin' ? h('p', { class: 'muted small name-tip' }, t('Type the names in English first: the Armenian and Russian boxes below fill in by themselves, or show guesses to choose from.')) : null,
+      h('div', { class: 'grid-2' }, NAME_PARTS_UI.map(([part, label]) => {
+        const key = `${sc}.${part}`;
+        const input = h('input', {
+          type: 'text', value: n[part] || '', lang,
+          oninput: (e) => {
+            n[part] = e.target.value;
+            touch();
+            if (sc === 'latin') suggestSoon[part]();
+            else { autoFilled.delete(key); clear(nameInputs[key].hint); }
+          },
+        });
+        const hint = h('div', { class: 'name-hint' });
+        nameInputs[key] = { input, hint };
+        return h('label', { class: 'field' }, h('span', {}, label), input, hint);
+      })));
   });
+  // Show guesses for empty boxes when opening someone already typed in English.
+  queueMicrotask(() => { for (const [part] of NAME_PARTS_UI) if (person.names.latin[part]) suggestFrom(part, { fill: false }); });
 
   // ----- relationships -----
   const relBox = h('div', {});
@@ -852,9 +914,9 @@ async function editorPage(id) {
 
   const statusChoice = h('div', { class: 'grid-3' },
     h('fieldset', { class: 'radio-group' }, h('legend', {}, t('Status')),
-      h('label', { class: 'check' }, h('input', { type: 'radio', name: 'living', checked: !person.living, onchange: () => { person.living = false; touch(); drawPrivacy(); drawDeath(); } }), t('Deceased')),
-      h('label', { class: 'check' }, h('input', { type: 'radio', name: 'living', checked: person.living, onchange: () => { person.living = true; touch(); drawPrivacy(); drawDeath(); } }), t('Living'))),
-    select(t('Sex'), { unknown: t('Unknown'), female: t('Female'), male: t('Male') }, () => person.sex, (v) => { person.sex = v; }),
+      h('label', { class: 'check' }, h('input', { type: 'radio', name: 'living', checked: person.living, onchange: () => { person.living = true; touch(); drawPrivacy(); drawDeath(); } }), t('Living')),
+      h('label', { class: 'check' }, h('input', { type: 'radio', name: 'living', checked: !person.living, onchange: () => { person.living = false; touch(); drawPrivacy(); drawDeath(); } }), t('Deceased'))),
+    select(t('Sex'), { unknown: t('Unknown'), female: t('Female'), male: t('Male') }, () => person.sex, (v) => { person.sex = v; suggestFrom('patronymic'); }),
     h('label', { class: 'check placeholder-check' }, h('input', {
       type: 'checkbox', checked: !!person.placeholder, onchange: (e) => { person.placeholder = e.target.checked; touch(); },
     }), h('span', {}, h('strong', {}, t('Unknown person (placeholder)')), h('br'), h('small', { class: 'muted' }, t('Use for someone who must exist but is not known yet, so the gap is visible.')))));
